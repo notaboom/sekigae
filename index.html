@@ -20,7 +20,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-      const { useEffect, useMemo, useState } = React;
+      const { useEffect, useMemo, useState, useRef } = React;
 
       // ---------- Storage ----------
       const STORAGE_KEY = "seat_shuffle_demo_v1";
@@ -71,7 +71,8 @@
           s === "女" ||
           s === "女性" ||
           s === "女子"
-        ) return "female";
+        )
+          return "female";
 
         if (
           s === "m" ||
@@ -81,7 +82,8 @@
           s === "男" ||
           s === "男性" ||
           s === "男子"
-        ) return "male";
+        )
+          return "male";
 
         return "unknown";
       }
@@ -659,6 +661,24 @@
         const [options, setOptions] = useState(DEFAULT_OPTIONS);
         const [optionsOpen, setOptionsOpen] = useState(false); // デフォルト畳む
 
+        // ---- iPhoneで横スクロールを減らす：フィット表示（縮小） ----
+        const [fitToScreen, setFitToScreen] = useState(true); // デフォルトON
+        const [fitScale, setFitScale] = useState(1);
+        const [isMobile, setIsMobile] = useState(false);
+        const gridViewportRef = useRef(null);
+
+        const GAP_PX = 8; // gap-2 相当
+        const cellBasePx = isMobile ? 72 : 84; // “素の”マス幅（これを縮小してフィット）
+        const naturalGridWidth = useMemo(() => cols * cellBasePx + (cols - 1) * GAP_PX, [cols, isMobile]);
+
+        const compactMode = fitToScreen && fitScale < 0.86;
+
+        const shortenName = (name, max = 3) => {
+          const s = (name || "").trim();
+          if (!s) return "";
+          return s.length > max ? s.slice(0, max) + "…" : s;
+        };
+
         // load
         useEffect(() => {
           try {
@@ -691,9 +711,41 @@
             history,
             current,
             options,
+            fitToScreen,
           };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        }, [students, rows, cols, blocked, fixedMap, history, current, options]);
+        }, [students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen]);
+
+        // モバイル判定（幅変化で追従）
+        useEffect(() => {
+          const mq = window.matchMedia("(max-width: 640px)");
+          const apply = () => setIsMobile(mq.matches);
+          apply();
+          mq.addEventListener?.("change", apply);
+          return () => mq.removeEventListener?.("change", apply);
+        }, []);
+
+        // 座席表を横幅にフィットさせる縮小率を計算
+        useEffect(() => {
+          const el = gridViewportRef.current;
+          if (!el) return;
+
+          const compute = () => {
+            const vw = el.clientWidth || 1;
+            const s = fitToScreen ? Math.min(1, vw / naturalGridWidth) : 1;
+            setFitScale(s);
+          };
+
+          compute();
+          const ro = new ResizeObserver(compute);
+          ro.observe(el);
+          window.addEventListener("orientationchange", compute);
+
+          return () => {
+            ro.disconnect();
+            window.removeEventListener("orientationchange", compute);
+          };
+        }, [fitToScreen, naturalGridWidth]);
 
         const studentsById = useMemo(() => new Map(students.map((s) => [s.id, s])), [students]);
         const fixedStudentIds = useMemo(() => new Set(Object.values(fixedMap || {})), [fixedMap]);
@@ -762,7 +814,7 @@
           return { sameSeat, sameNeighbor };
         }, [current, prevHistory]);
 
-        // ★追加：直前の履歴と「左右（横）」の組み合わせが同じペアを検出して、該当席をハイライトする
+        // 直前の履歴と「左右（横）」の組み合わせが同じペアを検出して、該当席をハイライトする
         const repeatLR = useMemo(() => {
           if (!current?.grid || !prevHistory?.grid) return { count: 0, seatKeys: new Set() };
 
@@ -922,6 +974,7 @@
             history,
             current,
             options,
+            fitToScreen,
             exportedAt: new Date().toISOString(),
           };
           const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -946,6 +999,7 @@
           if (data.current) setCurrent(data.current);
 
           if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
+          if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
         };
 
         const onSeatClick = (r, c) => setSelectedSeat(seatKey(r, c));
@@ -958,9 +1012,9 @@
             <div className="max-w-6xl mx-auto px-4 py-6">
               <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
                 <div>
-                  <h1 className="text-2xl font-bold text-gray-900">小学校 席替えアプリ</h1>
+                  <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
                   <p className="text-sm text-gray-600 mt-1">
-                    名簿・属性・座席制約・ランダム配置・履歴を localStorage に保存。スマホ/タブレットでもブラウザで動きます。
+                    名簿・属性・座席制約・ランダム配置・履歴をローカルに保存。スマホ/タブレットでもブラウザで動きます。
                   </p>
                   <div className="flex flex-wrap gap-2 mt-2">
                     <Pill tone="info">生徒 {students.length}人</Pill>
@@ -1015,23 +1069,47 @@
                 <div className="lg:col-span-2 space-y-4">
                   <Section
                     title="座席表"
-                    subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。前回と同じ左右ペアがある席は赤枠＋『左右(前回同じ)』で表示します。"
+                    subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。iPhone等で列数が多い場合は『横幅に合わせて縮小』で横スクロールを減らします。前回と同じ左右ペアがある席は赤枠＋『左右(前回同じ)』で表示。"
                     right={
-                      <div className="flex items-center gap-2">
-                        <div className="text-xs text-gray-500">縦×横</div>
-                        <div className="w-16">
-                          <Input type="number" min={1} max={15} value={rows} onChange={(v) => setRows(Math.max(1, Math.min(15, v || 1)))} />
-                        </div>
-                        <div className="text-xs text-gray-500">×</div>
-                        <div className="w-16">
-                          <Input type="number" min={1} max={15} value={cols} onChange={(v) => setCols(Math.max(1, Math.min(15, v || 1)))} />
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                        <label className="flex items-center gap-2 text-xs text-gray-700">
+                          <input type="checkbox" checked={fitToScreen} onChange={(e) => setFitToScreen(e.target.checked)} />
+                          横幅に合わせて縮小
+                        </label>
+
+                        <div className="flex items-center gap-2">
+                          <div className="text-xs text-gray-500">縦×横</div>
+                          <div className="w-16">
+                            <Input type="number" min={1} max={15} value={rows} onChange={(v) => setRows(Math.max(1, Math.min(15, v || 1)))} />
+                          </div>
+                          <div className="text-xs text-gray-500">×</div>
+                          <div className="w-16">
+                            <Input type="number" min={1} max={15} value={cols} onChange={(v) => setCols(Math.max(1, Math.min(15, v || 1)))} />
+                          </div>
                         </div>
                       </div>
                     }
                   >
-                    <div className="overflow-auto">
-                      <div className="inline-block min-w-full">
-                        <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${cols}, minmax(64px, 1fr))` }}>
+                    <div ref={gridViewportRef} className={fitToScreen ? "overflow-hidden" : "overflow-auto"}>
+                      {fitToScreen && fitScale < 1 ? (
+                        <div className="text-xs text-gray-500 mb-2">
+                          横幅に合わせて縮小表示中（{Math.round(fitScale * 100)}%）{compactMode ? " / 省略表示" : ""}
+                        </div>
+                      ) : null}
+
+                      <div
+                        style={{
+                          transform: `scale(${fitScale})`,
+                          transformOrigin: "top left",
+                          width: naturalGridWidth,
+                        }}
+                      >
+                        <div
+                          className="grid gap-2"
+                          style={{
+                            gridTemplateColumns: `repeat(${cols}, ${cellBasePx}px)`,
+                          }}
+                        >
                           {Array.from({ length: rows }).map((_, r) =>
                             Array.from({ length: cols }).map((_, c) => {
                               const { sk, isBlocked, fixedId } = seatInfoFor(r, c);
@@ -1039,12 +1117,15 @@
                               const st = sid ? studentsById.get(sid) : null;
                               const isSelected = selectedSeat === sk;
 
-                              // ★追加：同じ左右ペアに含まれる席を強調
                               const isRepeatLR = !!(repeatLR?.seatKeys && repeatLR.seatKeys.has(sk));
                               const repeatOutline = !isBlocked && isRepeatLR ? "outline outline-2 outline-rose-400 outline-offset-1" : "";
 
+                              const showTags = !compactMode;
+
                               const base =
                                 "rounded-2xl border p-2 text-xs sm:text-sm min-h-[64px] flex flex-col justify-between text-left transition";
+                              const baseCompact =
+                                "rounded-2xl border p-1 text-[10px] min-h-[52px] flex flex-col justify-between text-left transition";
 
                               let bg = "bg-white border-gray-200";
                               if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
@@ -1063,10 +1144,19 @@
                                   ? "text-rose-700"
                                   : "text-gray-900";
 
+                              const displayName = isBlocked ? "利用不可" : st ? (compactMode ? shortenName(st.name, 3) : st.name) : "空";
+
                               return (
-                                <button key={sk} onClick={() => onSeatClick(r, c)} className={`${base} ${bg} ${ring} ${repeatOutline}`}>
+                                <button
+                                  key={sk}
+                                  onClick={() => onSeatClick(r, c)}
+                                  className={`${compactMode ? baseCompact : base} ${bg} ${ring} ${repeatOutline}`}
+                                  title={st ? st.name : ""}
+                                >
                                   <div className="flex items-start justify-between gap-2">
-                                    <div className={`font-semibold ${nameColor}`}>{isBlocked ? "利用不可" : st ? st.name : "空"}</div>
+                                    <div className={`font-semibold ${nameColor} ${compactMode ? "leading-tight" : ""} truncate`}>
+                                      {displayName}
+                                    </div>
                                     <div className="text-[10px] text-gray-400">
                                       {r + 1}-{c + 1}
                                     </div>
@@ -1076,9 +1166,10 @@
                                     {isBlocked ? <Pill>×</Pill> : null}
                                     {fixedId ? <Pill tone="warn">固定</Pill> : null}
                                     {isRepeatLR ? <Pill tone="bad">左右(前回同じ)</Pill> : null}
-                                    {st ? <Pill tone={genderTone(st.gender)}>性別:{genderLabel(st.gender)}</Pill> : null}
-                                    {st?.vision === "poor" ? <Pill tone="info">視力:配慮</Pill> : null}
-                                    {st?.height === "tall" ? <Pill tone="neutral">身長:高</Pill> : null}
+
+                                    {showTags && st ? <Pill tone={genderTone(st.gender)}>性別:{genderLabel(st.gender)}</Pill> : null}
+                                    {showTags && st?.vision === "poor" ? <Pill tone="info">視力:配慮</Pill> : null}
+                                    {showTags && st?.height === "tall" ? <Pill tone="neutral">身長:高</Pill> : null}
                                   </div>
                                 </button>
                               );
@@ -1159,7 +1250,7 @@
 
                 {/* Roster & Options */}
                 <div className="space-y-4">
-                  <Section title="名簿" subtitle="生徒名と属性を登録。CSV/TSV貼り付けもOK。">
+                  <Section title="名簿" subtitle="生徒名と属性を登録。CSV貼り付けもOK。">
                     <div className="grid grid-cols-1 gap-3">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <div>
@@ -1218,8 +1309,8 @@
                     </div>
 
                     <div className="mt-4">
-                      <div className="text-sm font-medium text-gray-900">CSV/TSV貼り付けで一括追加</div>
-                      <div className="text-xs text-gray-500 mt-1">列: 名前, 性別, 視力, 身長, メモ…（旧形式: 名前, 視力, 身長, メモ… も可）</div>
+                      <div className="text-sm font-medium text-gray-900">CSV貼り付けで一括追加</div>
+                      <div className="text-xs text-gray-500 mt-1">列: 名前, 性別, 視力, 身長, メモ…</div>
                       <div className="mt-2">
                         <TextArea
                           value={csvText}
@@ -1317,9 +1408,9 @@
                     </div>
                   </Section>
 
-                  <Section title="使い方" subtitle="確認用の最短手順です。">
+                  <Section title="使い方" subtitle="">
                     <ol className="list-decimal pl-5 text-sm text-gray-700 space-y-2">
-                      <li>右の「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
+                      <li>「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
                       <li>座席表をタップして、利用不可や固定割当を必要に応じて設定。</li>
                       <li>上部の「席替えを生成」を押す。</li>
                       <li>気に入らなければもう一度生成（履歴が増えるので少しずつ「過去と違う」方向に寄ります）。</li>
