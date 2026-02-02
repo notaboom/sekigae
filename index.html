@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>席替えアプリ</title>
 
-    <!-- Tailwind（ビルド不要のCDN版） -->
+    <!-- Tailwind（CDN） -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- React（ビルド不要のUMD版） -->
+    <!-- React（UMD） -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
@@ -23,7 +23,8 @@
       const { useEffect, useMemo, useState, useRef } = React;
 
       // ---------- Storage ----------
-      const STORAGE_KEY = "seat_shuffle_demo_v1";
+      const STORAGE_KEY = "seat_shuffle_v1";
+      const LEGACY_STORAGE_KEY = "seat_shuffle_demo_v1"; // 旧キー互換（読み込みのみ）
 
       const DEFAULT_OPTIONS = {
         trials: 80,
@@ -145,46 +146,8 @@
         if (!current || !Array.isArray(history) || history.length < 2) return null;
         const idx = history.findIndex((h) => h?.id === current?.id);
         if (idx > 0) return history[idx - 1];
-        // current が見つからない場合は、従来通り「最新のひとつ前」
+        // current が見つからない場合は「最新のひとつ前」
         return history[history.length - 2] || null;
-      }
-
-      // ---------- CSV helpers ----------
-      function csvEscapeCell(v) {
-        const s = (v ?? "").toString();
-        if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-        return s;
-      }
-
-      // ★ 履歴CSV: 行列ヘッダ不要。座席順に「名前のみ」を1行ずつ列挙（空席・利用不可はスキップ）
-      function gridToNameListCSV({ item, studentsById }) {
-        const rows = item?.rows ?? 0;
-        const cols = item?.cols ?? 0;
-        const grid = item?.grid || [];
-
-        const names = [];
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            const sid = grid?.[r]?.[c] ?? null;
-            if (!sid) continue;
-            const name = studentsById.get(sid)?.name ?? "";
-            if (!name) continue;
-            names.push(name);
-          }
-        }
-
-        // 1行1名
-        return names.map((n) => csvEscapeCell(n)).join("\r\n");
-      }
-
-      function downloadTextFile({ filename, text, mime = "text/plain;charset=utf-8" }) {
-        const blob = new Blob([text], { type: mime });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
       }
 
       // ---------- Parsing ----------
@@ -359,7 +322,7 @@
               if (!st || st.vision !== "poor") continue;
 
               const right = c + 1 < cols ? grid[r][c + 1] : null;
-              const down = r + 1 < h ? grid[r + 1][c] : null;
+              const down = r + 1 < rows ? grid[r + 1][c] : null;
 
               const stR = right ? studentsById.get(right) : null;
               const stD = down ? studentsById.get(down) : null;
@@ -370,6 +333,7 @@
           }
 
           // 5) (任意) 男女をなるべく隣り合わせ（2列ごとのペアで判定）
+          // 例: (1,2列) (3,4列) ... を同一行で評価。ペアをまたぐ隣や前後は評価しない。
           if (options.preferMixedGender && options.genderMixWeight > 0) {
             for (let r = 0; r < rows; r++) {
               for (let c = 0; c < cols; c += 2) {
@@ -425,6 +389,7 @@
         };
 
         const buildPlacementOrder = (arr) => {
+          // 視力poorを前優先のため先に。男女混在ONなら交互配置を初期解で少し意識。
           const poor = arr.filter((s) => s.vision === "poor");
           const rest = arr.filter((s) => s.vision !== "poor");
 
@@ -462,6 +427,7 @@
         const placeMovable = (grid, order) => {
           const priority = buildPlacementOrder(order);
 
+          // open seats sorted by frontness
           const openSeatsSorted = openSeatKeys
             .slice()
             .sort((a, b) => {
@@ -496,12 +462,13 @@
               const sk = seatKey(r, c);
               if (blocked.has(sk)) continue;
               if (fixedSeatToStudent.has(sk)) continue;
-              pos.push([r, c]);
+              pos.push([r, c]); // nullも含める（余席がある場合の入れ替え用）
             }
           }
           return pos;
         };
 
+        // Search
         const trials = options.trials;
         const hillSteps = options.hillSteps;
         let best = null;
@@ -538,6 +505,82 @@
         return { ok: true, ...best };
       }
 
+      // ---------- CSV helpers ----------
+      function csvEscape(value) {
+        const s = (value ?? "").toString();
+        if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      }
+
+      function sanitizeFilename(name) {
+        const s = (name || "sekigae").toString();
+        return s.replace(/[\\/:*?"<>|]/g, "_");
+      }
+
+      function downloadTextFile(filename, content, mime = "text/plain") {
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      async function copyToClipboard(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {
+          // fallback
+          try {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.top = "-1000px";
+            ta.style.left = "-1000px";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            const ok = document.execCommand("copy");
+            document.body.removeChild(ta);
+            return ok;
+          } catch (_) {
+            return false;
+          }
+        }
+      }
+
+      function buildCSVFromHistoryItem(item, fallbackStudentsById) {
+        const rows = item?.rows ?? 0;
+        const cols = item?.cols ?? 0;
+        const grid = item?.grid;
+
+        const map = new Map();
+        if (Array.isArray(item?.rosterSnapshot)) {
+          for (const s of item.rosterSnapshot) {
+            if (s?.id) map.set(s.id, s?.name ?? "");
+          }
+        } else if (fallbackStudentsById) {
+          for (const [id, st] of fallbackStudentsById.entries()) {
+            map.set(id, st?.name ?? "");
+          }
+        }
+
+        const lines = [];
+        for (let r = 0; r < rows; r++) {
+          const rowCells = [];
+          for (let c = 0; c < cols; c++) {
+            const sid = grid?.[r]?.[c] ?? null;
+            const name = sid ? map.get(sid) || "" : "";
+            rowCells.push(csvEscape(name));
+          }
+          lines.push(rowCells.join(","));
+        }
+        // Excel向けにCRLF
+        return lines.join("\r\n");
+      }
+
       // ---------- UI Components ----------
       function Pill({ children, tone = "neutral" }) {
         const toneMap = {
@@ -548,9 +591,8 @@
           info: "bg-sky-50 text-sky-700 border-sky-200",
           male: "bg-sky-50 text-sky-700 border-sky-200",
           female: "bg-rose-50 text-rose-700 border-rose-200",
-          // 視力（配慮）はタグだけ黄色
-          vision: "bg-yellow-50 text-yellow-800 border-yellow-200",
           unknown: "bg-gray-100 text-gray-700 border-gray-200",
+          vision: "bg-amber-50 text-amber-800 border-amber-200", // 視力（タグのみ黄色）
         };
         return (
           <span className={`inline-flex items-center px-2 py-0.5 text-xs border rounded-full ${toneMap[tone] || toneMap.neutral}`}>
@@ -695,24 +737,24 @@
         const [newNotes, setNewNotes] = useState("");
 
         const [options, setOptions] = useState(DEFAULT_OPTIONS);
-        const [optionsOpen, setOptionsOpen] = useState(false);
+        const [optionsOpen, setOptionsOpen] = useState(false); // デフォルト畳む
 
         // ---- iPhoneで横スクロールを減らす：フィット表示（縮小） ----
-        const [fitToScreen, setFitToScreen] = useState(true);
+        const [fitToScreen, setFitToScreen] = useState(true); // デフォルトON
         const [fitScale, setFitScale] = useState(1);
         const [isMobile, setIsMobile] = useState(false);
         const gridViewportRef = useRef(null);
 
-        const GAP_PX = 8;
-        const cellBasePx = isMobile ? 72 : 84;
+        const GAP_PX = 8; // gap-2 相当
+        const cellBasePx = isMobile ? 72 : 84; // “素の”マス幅（これを縮小してフィット）
         const naturalGridWidth = useMemo(() => cols * cellBasePx + (cols - 1) * GAP_PX, [cols, isMobile]);
 
         const compactMode = fitToScreen && fitScale < 0.86;
 
-        // load
+        // load（新キー優先、無ければ旧キー）
         useEffect(() => {
           try {
-            const raw = localStorage.getItem(STORAGE_KEY);
+            const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
             if (!raw) return;
             const data = JSON.parse(raw);
 
@@ -726,6 +768,11 @@
 
             if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
             if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
+
+            // 旧キーから読んだ場合は、新キーに寄せる（次回以降）
+            if (!localStorage.getItem(STORAGE_KEY) && localStorage.getItem(LEGACY_STORAGE_KEY)) {
+              // save effect が走るのでここでは何もしない
+            }
           } catch (e) {
             console.warn(e);
           }
@@ -747,7 +794,7 @@
           localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
         }, [students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen]);
 
-        // モバイル判定
+        // モバイル判定（幅変化で追従）
         useEffect(() => {
           const mq = window.matchMedia("(max-width: 640px)");
           const apply = () => setIsMobile(mq.matches);
@@ -756,7 +803,7 @@
           return () => mq.removeEventListener?.("change", apply);
         }, []);
 
-        // フィット縮小率
+        // 座席表を横幅にフィットさせる縮小率を計算
         useEffect(() => {
           const el = gridViewportRef.current;
           if (!el) return;
@@ -821,8 +868,10 @@
 
         const visionPoorCount = useMemo(() => students.filter((s) => s.vision === "poor").length, [students]);
 
+        // 直前の履歴（現在表示している履歴に対して）
         const prevHistory = useMemo(() => getPrevHistoryItem(history, current), [history, current]);
 
+        // 直前との差（同席 / 同隣）
         const layoutStats = useMemo(() => {
           if (!current?.grid || !prevHistory?.grid) return null;
 
@@ -843,6 +892,7 @@
           return { sameSeat, sameNeighbor };
         }, [current, prevHistory]);
 
+        // 直前の履歴と「左右（横）」の組み合わせが同じペアを検出して、該当席をハイライトする
         const repeatLR = useMemo(() => {
           if (!current?.grid || !prevHistory?.grid) return { count: 0, seatKeys: new Set() };
 
@@ -971,6 +1021,14 @@
             grid: res.grid,
             pairs: res.pairs,
             score: res.score,
+            // 将来、名簿が変わってもCSV出力できるようにスナップショットを保持
+            rosterSnapshot: students.map((s) => ({
+              id: s.id,
+              name: s.name,
+              gender: s.gender,
+              vision: s.vision,
+              height: s.height,
+            })),
           };
           setCurrent(item);
           setHistory((prev) => prev.concat([item]));
@@ -991,21 +1049,7 @@
           if (current?.id === id) setCurrent(null);
         };
 
-        // ★ 履歴1件を「名前だけCSV」で出力（1行1名）
-        const exportHistoryCSV = (h) => {
-          if (!h?.grid) {
-            alert("この履歴には座席データがありません。");
-            return;
-          }
-          const csv = gridToNameListCSV({ item: h, studentsById });
-          const safeTitle = (h.title || "sekigae")
-            .replace(/[\\/:*?"<>|]/g, "_")
-            .replace(/\s+/g, " ")
-            .trim();
-          const filename = `${safeTitle}.csv`;
-          downloadTextFile({ filename, text: csv, mime: "text/csv;charset=utf-8" });
-        };
-
+        // 表示文言は「情報を保存」「情報を読込」
         const exportJSON = () => {
           const data = {
             students,
@@ -1044,6 +1088,23 @@
           if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
         };
 
+        // 履歴の座席結果をCSV（名前だけ）として出力：カンマ区切り＋改行（Excelに貼り付けやすい）
+        const exportHistoryCSV = (h) => {
+          const csv = buildCSVFromHistoryItem(h, studentsById);
+          // Excel対策：UTF-8 BOM付きで保存
+          const csvWithBom = "\ufeff" + csv;
+
+          const base = sanitizeFilename(h?.title || "sekigae");
+          const filename = `${base}.csv`;
+          downloadTextFile(filename, csvWithBom, "text/csv;charset=utf-8");
+        };
+
+        const copyHistoryCSV = async (h) => {
+          const csv = buildCSVFromHistoryItem(h, studentsById);
+          const ok = await copyToClipboard(csv);
+          alert(ok ? "CSVをクリップボードにコピーしました。Excelに貼り付けできます。" : "コピーに失敗しました。");
+        };
+
         const onSeatClick = (r, c) => setSelectedSeat(seatKey(r, c));
 
         const genderLabel = (g) => (g === "male" ? "男" : g === "female" ? "女" : "未");
@@ -1056,12 +1117,12 @@
                 <div>
                   <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
                   <p className="text-sm text-gray-600 mt-1">
-                    名簿・属性・座席制約・ランダム配置・履歴を localStorage に保存。スマホ/タブレットでもブラウザで動きます。
+                    名簿・属性・座席制約・ランダム配置・履歴を端末内の localStorage に保存。スマホ/タブレットでもブラウザで動きます。
                   </p>
                   <div className="flex flex-wrap gap-2 mt-2">
                     <Pill tone="info">生徒 {students.length}人</Pill>
                     <Pill tone={countOpenSeats >= students.length ? "good" : "bad"}>利用可能 {countOpenSeats}席</Pill>
-                    <Pill tone={visionPoorCount ? "warn" : "neutral"}>前方配慮（視力） {visionPoorCount}人</Pill>
+                    <Pill tone={visionPoorCount ? "warn" : "neutral"}>視力配慮 {visionPoorCount}人</Pill>
                     {options.preferMixedGender ? <Pill tone="info">男女を隣り合わせ: ON</Pill> : <Pill>男女を隣り合わせ: OFF</Pill>}
                     {current ? <Pill tone="good">現在表示: {current.title}</Pill> : <Pill>現在表示: 未生成</Pill>}
 
@@ -1111,7 +1172,7 @@
                 <div className="lg:col-span-2 space-y-4">
                   <Section
                     title="座席表"
-                    subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。iPhone等で列数が多い場合は『横幅に合わせて縮小』で横スクロールを減らします。前回と同じ左右ペアがある席は赤枠＋『左右(前回同じ)』で表示。"
+                    subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。列数が多い場合は『横幅に合わせて縮小』で横スクロールを減らします。前回と同じ左右ペアがある席は赤枠＋『左右(前回同じ)』で表示。"
                     right={
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                         <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -1134,9 +1195,7 @@
                   >
                     <div ref={gridViewportRef} className={fitToScreen ? "overflow-hidden" : "overflow-auto"}>
                       {fitToScreen && fitScale < 1 ? (
-                        <div className="text-xs text-gray-500 mb-2">
-                          横幅に合わせて縮小表示中（{Math.round(fitScale * 100)}%）
-                        </div>
+                        <div className="text-xs text-gray-500 mb-2">横幅に合わせて縮小表示中（{Math.round(fitScale * 100)}%）</div>
                       ) : null}
 
                       <div
@@ -1167,9 +1226,8 @@
                               const base =
                                 "rounded-2xl border p-2 text-xs sm:text-sm min-h-[64px] flex flex-col justify-between text-left transition";
                               const baseCompact =
-                                "rounded-2xl border p-1 text-[10px] min-h-[60px] flex flex-col justify-between text-left transition";
+                                "rounded-2xl border p-1 text-[11px] min-h-[56px] flex flex-col justify-between text-left transition";
 
-                              // ★ 背景は性別色（視力では変えない）
                               let bg = "bg-white border-gray-200";
                               if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
                               if (st?.gender === "female") bg = "bg-rose-50 border-rose-200";
@@ -1197,13 +1255,10 @@
                                   title={st ? st.name : ""}
                                 >
                                   <div className="flex items-start justify-between gap-2">
-                                    <div
-                                      className={`font-semibold ${nameColor} leading-tight ${compactMode ? "text-[10px]" : ""} whitespace-normal break-words`}
-                                      style={{ wordBreak: "break-word" }}
-                                    >
+                                    <div className={`flex-1 min-w-0 font-semibold ${nameColor} whitespace-normal break-words ${compactMode ? "leading-tight" : ""}`}>
                                       {displayName}
                                     </div>
-                                    <div className="text-[10px] text-gray-400">
+                                    <div className="shrink-0 text-[10px] text-gray-400">
                                       {r + 1}-{c + 1}
                                     </div>
                                   </div>
@@ -1263,7 +1318,7 @@
                     ) : null}
                   </Section>
 
-                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴ごとに座席の“名前だけCSV（1行1名）”を出力できます。">
+                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴からCSV（名前だけ）をコピー/保存できます。">
                     {history.length === 0 ? (
                       <div className="text-sm text-gray-600">まだ履歴がありません。「席替えを生成」を押してください。</div>
                     ) : (
@@ -1273,19 +1328,21 @@
                           .reverse()
                           .map((h) => (
                             <div key={h.id} className="flex items-center justify-between gap-3 p-3 border border-gray-200 rounded-2xl bg-white">
-                              <div>
-                                <div className="text-sm font-semibold text-gray-900">{h.title}</div>
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-gray-900 whitespace-normal break-words">{h.title}</div>
                                 <div className="text-xs text-gray-500 mt-0.5">
                                   {new Date(h.createdAt).toLocaleString()} / {h.rows}×{h.cols} / score {Math.round(h.score)}
                                 </div>
                               </div>
                               <div className="flex items-center gap-2 flex-wrap justify-end">
-                                <Button variant="secondary" onClick={() => exportHistoryCSV(h)} title="この履歴の座席表を“名前だけ”のCSVで保存">
-                                  CSV出力
-                                </Button>
-
                                 <Button variant="secondary" onClick={() => loadHistory(h.id)}>
                                   表示
+                                </Button>
+                                <Button variant="ghost" onClick={() => copyHistoryCSV(h)} title="カンマ区切り＋改行のCSVをコピー（Excelに貼り付けOK）">
+                                  CSVコピー
+                                </Button>
+                                <Button variant="ghost" onClick={() => exportHistoryCSV(h)} title="CSVファイルとして保存（UTF-8）">
+                                  CSV保存
                                 </Button>
                                 <Button variant="danger" onClick={() => deleteHistory(h.id)}>
                                   削除
@@ -1384,8 +1441,8 @@
                         <div className="mt-2 max-h-[320px] overflow-auto space-y-2">
                           {students.map((s) => (
                             <div key={s.id} className="p-3 border border-gray-200 rounded-2xl bg-white flex items-start justify-between gap-3">
-                              <div>
-                                <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-gray-900 flex items-center gap-2 whitespace-normal break-words">
                                   {s.name}
                                   {fixedStudentIds.has(s.id) ? <Pill tone="warn">固定中</Pill> : null}
                                 </div>
@@ -1458,12 +1515,12 @@
                     </div>
                   </Section>
 
-                  <Section title="使い方" subtitle="確認用の最短手順です。">
+                  <Section title="使い方" subtitle="最短手順です。">
                     <ol className="list-decimal pl-5 text-sm text-gray-700 space-y-2">
-                      <li>「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
+                      <li>右の「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
                       <li>座席表をタップして、利用不可や固定割当を必要に応じて設定。</li>
                       <li>上部の「席替えを生成」を押す。</li>
-                      <li>気に入らなければもう一度生成（履歴が増えるので少しずつ「過去と違う」方向に寄ります）。</li>
+                      <li>履歴の「CSVコピー」でExcelへ貼り付け、または「CSV保存」でファイル出力。</li>
                     </ol>
                   </Section>
                 </div>
