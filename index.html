@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>席替えアプリ</title>
 
-    <!-- Tailwind（ビルド不要のCDN版：デモ用途） -->
+    <!-- Tailwind（ビルド不要のCDN版） -->
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- React（ビルド不要のUMD版） -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- JSXをブラウザで動かすためのBabel（デモ用途） -->
+    <!-- JSXをブラウザで動かすためのBabel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   </head>
 
@@ -147,6 +147,47 @@
         if (idx > 0) return history[idx - 1];
         // current が見つからない場合は、従来通り「最新のひとつ前」
         return history[history.length - 2] || null;
+      }
+
+      // ---------- CSV helpers ----------
+      function csvEscapeCell(v) {
+        const s = (v ?? "").toString();
+        // 逗号/改行/ダブルクォートがあればRFC4180風にクォート
+        if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      }
+
+      function gridToNameCSV({ item, studentsById }) {
+        // item.grid: studentId or null
+        const rows = item?.rows ?? 0;
+        const cols = item?.cols ?? 0;
+        const grid = item?.grid || [];
+
+        const lines = [];
+        // 先頭行に列番号（任意。不要なら削除OK）
+        lines.push(["", ...Array.from({ length: cols }, (_, i) => `列${i + 1}`)].map(csvEscapeCell).join(","));
+
+        for (let r = 0; r < rows; r++) {
+          const row = [];
+          row.push(`行${r + 1}`);
+          for (let c = 0; c < cols; c++) {
+            const sid = grid?.[r]?.[c] ?? null;
+            const name = sid ? studentsById.get(sid)?.name ?? "" : "";
+            row.push(name);
+          }
+          lines.push(row.map(csvEscapeCell).join(","));
+        }
+        return lines.join("\r\n");
+      }
+
+      function downloadTextFile({ filename, text, mime = "text/plain;charset=utf-8" }) {
+        const blob = new Blob([text], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
       }
 
       // ---------- Parsing ----------
@@ -332,7 +373,6 @@
           }
 
           // 5) (任意) 男女をなるべく隣り合わせ（2列ごとのペアで判定）
-          // 例: (1,2列) (3,4列) ... を同一行で評価。ペアをまたぐ隣や前後は評価しない。
           if (options.preferMixedGender && options.genderMixWeight > 0) {
             for (let r = 0; r < rows; r++) {
               for (let c = 0; c < cols; c += 2) {
@@ -514,6 +554,8 @@
           info: "bg-sky-50 text-sky-700 border-sky-200",
           male: "bg-sky-50 text-sky-700 border-sky-200",
           female: "bg-rose-50 text-rose-700 border-rose-200",
+          // 視力（配慮）を黄色系に
+          vision: "bg-yellow-50 text-yellow-800 border-yellow-200",
           unknown: "bg-gray-100 text-gray-700 border-gray-200",
         };
         return (
@@ -672,8 +714,6 @@
         const naturalGridWidth = useMemo(() => cols * cellBasePx + (cols - 1) * GAP_PX, [cols, isMobile]);
 
         const compactMode = fitToScreen && fitScale < 0.86;
-
-        // ★ 省略表示はしない（…禁止）なので shortenName は削除
 
         // load
         useEffect(() => {
@@ -960,6 +1000,21 @@
           if (current?.id === id) setCurrent(null);
         };
 
+        // ★ 履歴1件を「名前だけCSV」で出力
+        const exportHistoryCSV = (h) => {
+          if (!h?.grid) {
+            alert("この履歴には座席データがありません。");
+            return;
+          }
+          const csv = gridToNameCSV({ item: h, studentsById });
+          const safeTitle = (h.title || "sekigae")
+            .replace(/[\\/:*?"<>|]/g, "_")
+            .replace(/\s+/g, " ")
+            .trim();
+          const filename = `${safeTitle}.csv`;
+          downloadTextFile({ filename, text: csv, mime: "text/csv;charset=utf-8" });
+        };
+
         // 表示文言は「情報を保存」「情報を読込」
         const exportJSON = () => {
           const data = {
@@ -1117,18 +1172,18 @@
                               const isRepeatLR = !!(repeatLR?.seatKeys && repeatLR.seatKeys.has(sk));
                               const repeatOutline = !isBlocked && isRepeatLR ? "outline outline-2 outline-rose-400 outline-offset-1" : "";
 
-                              // 縮小時はタグを隠して名前を見やすく
                               const showTags = !compactMode;
 
                               const base =
                                 "rounded-2xl border p-2 text-xs sm:text-sm min-h-[64px] flex flex-col justify-between text-left transition";
-                              // ★ 省略しないので、折り返しの分だけ高さを少し増やす
                               const baseCompact =
                                 "rounded-2xl border p-1 text-[10px] min-h-[60px] flex flex-col justify-between text-left transition";
 
+                              // 視力(配慮)は黄色背景（最優先で上書き）
                               let bg = "bg-white border-gray-200";
                               if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
                               if (st?.gender === "female") bg = "bg-rose-50 border-rose-200";
+                              if (st?.vision === "poor") bg = "bg-yellow-50 border-yellow-200";
 
                               if (isBlocked) bg = "bg-gray-200 border-gray-200 text-gray-500";
                               if (fixedId) bg = "bg-amber-50 border-amber-200";
@@ -1137,13 +1192,14 @@
                               const nameColor =
                                 isBlocked
                                   ? "text-gray-500"
+                                  : st?.vision === "poor"
+                                  ? "text-yellow-900"
                                   : st?.gender === "male"
                                   ? "text-sky-700"
                                   : st?.gender === "female"
                                   ? "text-rose-700"
                                   : "text-gray-900";
 
-                              // ★ 表示名は常にフル（省略禁止）
                               const displayName = isBlocked ? "利用不可" : st ? st.name : "空";
 
                               return (
@@ -1154,11 +1210,8 @@
                                   title={st ? st.name : ""}
                                 >
                                   <div className="flex items-start justify-between gap-2">
-                                    {/* ★ truncate をやめて折り返し表示 */}
                                     <div
-                                      className={`font-semibold ${nameColor} leading-tight ${
-                                        compactMode ? "text-[10px]" : ""
-                                      } whitespace-normal break-words`}
+                                      className={`font-semibold ${nameColor} leading-tight ${compactMode ? "text-[10px]" : ""} whitespace-normal break-words`}
                                       style={{ wordBreak: "break-word" }}
                                     >
                                       {displayName}
@@ -1174,7 +1227,7 @@
                                     {isRepeatLR ? <Pill tone="bad">左右(前回同じ)</Pill> : null}
 
                                     {showTags && st ? <Pill tone={genderTone(st.gender)}>性別:{genderLabel(st.gender)}</Pill> : null}
-                                    {showTags && st?.vision === "poor" ? <Pill tone="info">視力:配慮</Pill> : null}
+                                    {showTags && st?.vision === "poor" ? <Pill tone="vision">視力:配慮</Pill> : null}
                                     {showTags && st?.height === "tall" ? <Pill tone="neutral">身長:高</Pill> : null}
                                   </div>
                                 </button>
@@ -1223,7 +1276,7 @@
                     ) : null}
                   </Section>
 
-                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。">
+                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴ごとに座席の“名前だけCSV”も出力できます。">
                     {history.length === 0 ? (
                       <div className="text-sm text-gray-600">まだ履歴がありません。「席替えを生成」を押してください。</div>
                     ) : (
@@ -1239,7 +1292,12 @@
                                   {new Date(h.createdAt).toLocaleString()} / {h.rows}×{h.cols} / score {Math.round(h.score)}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap justify-end">
+                                {/* ★ 追加：履歴1件の座席をCSV出力（名前のみ） */}
+                                <Button variant="secondary" onClick={() => exportHistoryCSV(h)} title="この履歴の座席表を“名前だけ”のCSVで保存">
+                                  CSV出力
+                                </Button>
+
                                 <Button variant="secondary" onClick={() => loadHistory(h.id)}>
                                   表示
                                 </Button>
@@ -1347,7 +1405,7 @@
                                 </div>
                                 <div className="flex flex-wrap gap-2 mt-1">
                                   <Pill tone={genderTone(s.gender)}>性別: {genderLabel(s.gender)}</Pill>
-                                  <Pill tone={s.vision === "poor" ? "info" : "neutral"}>視力: {s.vision === "poor" ? "配慮" : "普通"}</Pill>
+                                  <Pill tone={s.vision === "poor" ? "vision" : "neutral"}>視力: {s.vision === "poor" ? "配慮" : "普通"}</Pill>
                                   <Pill>身長: {s.height === "tall" ? "高" : "普通"}</Pill>
                                   {s.notes ? <Pill>{s.notes}</Pill> : null}
                                 </div>
