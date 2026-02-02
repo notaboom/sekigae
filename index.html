@@ -152,32 +152,29 @@
       // ---------- CSV helpers ----------
       function csvEscapeCell(v) {
         const s = (v ?? "").toString();
-        // 逗号/改行/ダブルクォートがあればRFC4180風にクォート
         if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
         return s;
       }
 
-      function gridToNameCSV({ item, studentsById }) {
-        // item.grid: studentId or null
+      // ★ 履歴CSV: 行列ヘッダ不要。座席順に「名前のみ」を1行ずつ列挙（空席・利用不可はスキップ）
+      function gridToNameListCSV({ item, studentsById }) {
         const rows = item?.rows ?? 0;
         const cols = item?.cols ?? 0;
         const grid = item?.grid || [];
 
-        const lines = [];
-        // 先頭行に列番号（任意。不要なら削除OK）
-        lines.push(["", ...Array.from({ length: cols }, (_, i) => `列${i + 1}`)].map(csvEscapeCell).join(","));
-
+        const names = [];
         for (let r = 0; r < rows; r++) {
-          const row = [];
-          row.push(`行${r + 1}`);
           for (let c = 0; c < cols; c++) {
             const sid = grid?.[r]?.[c] ?? null;
-            const name = sid ? studentsById.get(sid)?.name ?? "" : "";
-            row.push(name);
+            if (!sid) continue;
+            const name = studentsById.get(sid)?.name ?? "";
+            if (!name) continue;
+            names.push(name);
           }
-          lines.push(row.map(csvEscapeCell).join(","));
         }
-        return lines.join("\r\n");
+
+        // 1行1名
+        return names.map((n) => csvEscapeCell(n)).join("\r\n");
       }
 
       function downloadTextFile({ filename, text, mime = "text/plain;charset=utf-8" }) {
@@ -362,7 +359,7 @@
               if (!st || st.vision !== "poor") continue;
 
               const right = c + 1 < cols ? grid[r][c + 1] : null;
-              const down = r + 1 < rows ? grid[r + 1][c] : null;
+              const down = r + 1 < h ? grid[r + 1][c] : null;
 
               const stR = right ? studentsById.get(right) : null;
               const stD = down ? studentsById.get(down) : null;
@@ -428,7 +425,6 @@
         };
 
         const buildPlacementOrder = (arr) => {
-          // 視力poorを前優先のため先に。男女混在ONなら交互配置を初期解で少し意識。
           const poor = arr.filter((s) => s.vision === "poor");
           const rest = arr.filter((s) => s.vision !== "poor");
 
@@ -466,7 +462,6 @@
         const placeMovable = (grid, order) => {
           const priority = buildPlacementOrder(order);
 
-          // open seats sorted by frontness
           const openSeatsSorted = openSeatKeys
             .slice()
             .sort((a, b) => {
@@ -501,13 +496,12 @@
               const sk = seatKey(r, c);
               if (blocked.has(sk)) continue;
               if (fixedSeatToStudent.has(sk)) continue;
-              pos.push([r, c]); // nullも含める（余席がある場合の入れ替え用）
+              pos.push([r, c]);
             }
           }
           return pos;
         };
 
-        // Search
         const trials = options.trials;
         const hillSteps = options.hillSteps;
         let best = null;
@@ -554,7 +548,7 @@
           info: "bg-sky-50 text-sky-700 border-sky-200",
           male: "bg-sky-50 text-sky-700 border-sky-200",
           female: "bg-rose-50 text-rose-700 border-rose-200",
-          // 視力（配慮）を黄色系に
+          // 視力（配慮）はタグだけ黄色
           vision: "bg-yellow-50 text-yellow-800 border-yellow-200",
           unknown: "bg-gray-100 text-gray-700 border-gray-200",
         };
@@ -701,16 +695,16 @@
         const [newNotes, setNewNotes] = useState("");
 
         const [options, setOptions] = useState(DEFAULT_OPTIONS);
-        const [optionsOpen, setOptionsOpen] = useState(false); // デフォルト畳む
+        const [optionsOpen, setOptionsOpen] = useState(false);
 
         // ---- iPhoneで横スクロールを減らす：フィット表示（縮小） ----
-        const [fitToScreen, setFitToScreen] = useState(true); // デフォルトON
+        const [fitToScreen, setFitToScreen] = useState(true);
         const [fitScale, setFitScale] = useState(1);
         const [isMobile, setIsMobile] = useState(false);
         const gridViewportRef = useRef(null);
 
-        const GAP_PX = 8; // gap-2 相当
-        const cellBasePx = isMobile ? 72 : 84; // “素の”マス幅（これを縮小してフィット）
+        const GAP_PX = 8;
+        const cellBasePx = isMobile ? 72 : 84;
         const naturalGridWidth = useMemo(() => cols * cellBasePx + (cols - 1) * GAP_PX, [cols, isMobile]);
 
         const compactMode = fitToScreen && fitScale < 0.86;
@@ -753,7 +747,7 @@
           localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
         }, [students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen]);
 
-        // モバイル判定（幅変化で追従）
+        // モバイル判定
         useEffect(() => {
           const mq = window.matchMedia("(max-width: 640px)");
           const apply = () => setIsMobile(mq.matches);
@@ -762,7 +756,7 @@
           return () => mq.removeEventListener?.("change", apply);
         }, []);
 
-        // 座席表を横幅にフィットさせる縮小率を計算
+        // フィット縮小率
         useEffect(() => {
           const el = gridViewportRef.current;
           if (!el) return;
@@ -827,10 +821,8 @@
 
         const visionPoorCount = useMemo(() => students.filter((s) => s.vision === "poor").length, [students]);
 
-        // 直前の履歴（現在表示している履歴に対して）
         const prevHistory = useMemo(() => getPrevHistoryItem(history, current), [history, current]);
 
-        // 直前との差（同席 / 同隣）
         const layoutStats = useMemo(() => {
           if (!current?.grid || !prevHistory?.grid) return null;
 
@@ -851,7 +843,6 @@
           return { sameSeat, sameNeighbor };
         }, [current, prevHistory]);
 
-        // 直前の履歴と「左右（横）」の組み合わせが同じペアを検出して、該当席をハイライトする
         const repeatLR = useMemo(() => {
           if (!current?.grid || !prevHistory?.grid) return { count: 0, seatKeys: new Set() };
 
@@ -1000,13 +991,13 @@
           if (current?.id === id) setCurrent(null);
         };
 
-        // ★ 履歴1件を「名前だけCSV」で出力
+        // ★ 履歴1件を「名前だけCSV」で出力（1行1名）
         const exportHistoryCSV = (h) => {
           if (!h?.grid) {
             alert("この履歴には座席データがありません。");
             return;
           }
-          const csv = gridToNameCSV({ item: h, studentsById });
+          const csv = gridToNameListCSV({ item: h, studentsById });
           const safeTitle = (h.title || "sekigae")
             .replace(/[\\/:*?"<>|]/g, "_")
             .replace(/\s+/g, " ")
@@ -1015,7 +1006,6 @@
           downloadTextFile({ filename, text: csv, mime: "text/csv;charset=utf-8" });
         };
 
-        // 表示文言は「情報を保存」「情報を読込」
         const exportJSON = () => {
           const data = {
             students,
@@ -1179,11 +1169,10 @@
                               const baseCompact =
                                 "rounded-2xl border p-1 text-[10px] min-h-[60px] flex flex-col justify-between text-left transition";
 
-                              // 視力(配慮)は黄色背景（最優先で上書き）
+                              // ★ 背景は性別色（視力では変えない）
                               let bg = "bg-white border-gray-200";
                               if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
                               if (st?.gender === "female") bg = "bg-rose-50 border-rose-200";
-                              if (st?.vision === "poor") bg = "bg-yellow-50 border-yellow-200";
 
                               if (isBlocked) bg = "bg-gray-200 border-gray-200 text-gray-500";
                               if (fixedId) bg = "bg-amber-50 border-amber-200";
@@ -1192,8 +1181,6 @@
                               const nameColor =
                                 isBlocked
                                   ? "text-gray-500"
-                                  : st?.vision === "poor"
-                                  ? "text-yellow-900"
                                   : st?.gender === "male"
                                   ? "text-sky-700"
                                   : st?.gender === "female"
@@ -1276,7 +1263,7 @@
                     ) : null}
                   </Section>
 
-                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴ごとに座席の“名前だけCSV”も出力できます。">
+                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴ごとに座席の“名前だけCSV（1行1名）”を出力できます。">
                     {history.length === 0 ? (
                       <div className="text-sm text-gray-600">まだ履歴がありません。「席替えを生成」を押してください。</div>
                     ) : (
@@ -1293,7 +1280,6 @@
                                 </div>
                               </div>
                               <div className="flex items-center gap-2 flex-wrap justify-end">
-                                {/* ★ 追加：履歴1件の座席をCSV出力（名前のみ） */}
                                 <Button variant="secondary" onClick={() => exportHistoryCSV(h)} title="この履歴の座席表を“名前だけ”のCSVで保存">
                                   CSV出力
                                 </Button>
