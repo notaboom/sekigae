@@ -68,13 +68,34 @@
         return JSON.parse(JSON.stringify(obj));
       }
 
-      function normalizeGender(raw) {
-        const s = (raw || "").toString().trim().toLowerCase();
-        if (!s) return "unknown";
-        if (s === "m" || s.includes("male") || s.includes("man") || s.includes("男")) return "male";
-        if (s === "f" || s.includes("female") || s.includes("woman") || s.includes("女")) return "female";
-        return "unknown";
-      }
+function normalizeGender(raw) {
+  const s = (raw || "").toString().trim().toLowerCase();
+  if (!s) return "unknown";
+
+  // 先に female 系を判定（female に male が含まれる問題の回避）
+  if (
+    s === "f" ||
+    s === "female" ||
+    s === "woman" ||
+    s === "girl" ||
+    s === "女" ||
+    s === "女性" ||
+    s === "女子"
+  ) return "female";
+
+  if (
+    s === "m" ||
+    s === "male" ||
+    s === "man" ||
+    s === "boy" ||
+    s === "男" ||
+    s === "男性" ||
+    s === "男子"
+  ) return "male";
+
+  return "unknown";
+}
+
 
       function normalizeStudent(st) {
         const gender = st?.gender ?? st?.sex ?? "unknown";
