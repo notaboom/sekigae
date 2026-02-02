@@ -673,11 +673,7 @@
 
         const compactMode = fitToScreen && fitScale < 0.86;
 
-        const shortenName = (name, max = 3) => {
-          const s = (name || "").trim();
-          if (!s) return "";
-          return s.length > max ? s.slice(0, max) + "…" : s;
-        };
+        // ★ 省略表示はしない（…禁止）なので shortenName は削除
 
         // load
         useEffect(() => {
@@ -695,6 +691,7 @@
             if (data.current) setCurrent(data.current);
 
             if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
+            if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
           } catch (e) {
             console.warn(e);
           }
@@ -1012,9 +1009,9 @@
             <div className="max-w-6xl mx-auto px-4 py-6">
               <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
                 <div>
-                  <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
+                  <h1 className="text-2xl font-bold text-gray-900">小学校 席替えアプリ</h1>
                   <p className="text-sm text-gray-600 mt-1">
-                    名簿・属性・座席制約・ランダム配置・履歴をローカルに保存。スマホ/タブレットでもブラウザで動きます。
+                    名簿・属性・座席制約・ランダム配置・履歴を localStorage に保存。スマホ/タブレットでもブラウザで動きます。
                   </p>
                   <div className="flex flex-wrap gap-2 mt-2">
                     <Pill tone="info">生徒 {students.length}人</Pill>
@@ -1093,7 +1090,7 @@
                     <div ref={gridViewportRef} className={fitToScreen ? "overflow-hidden" : "overflow-auto"}>
                       {fitToScreen && fitScale < 1 ? (
                         <div className="text-xs text-gray-500 mb-2">
-                          横幅に合わせて縮小表示中（{Math.round(fitScale * 100)}%）{compactMode ? " / 省略表示" : ""}
+                          横幅に合わせて縮小表示中（{Math.round(fitScale * 100)}%）
                         </div>
                       ) : null}
 
@@ -1120,12 +1117,14 @@
                               const isRepeatLR = !!(repeatLR?.seatKeys && repeatLR.seatKeys.has(sk));
                               const repeatOutline = !isBlocked && isRepeatLR ? "outline outline-2 outline-rose-400 outline-offset-1" : "";
 
+                              // 縮小時はタグを隠して名前を見やすく
                               const showTags = !compactMode;
 
                               const base =
                                 "rounded-2xl border p-2 text-xs sm:text-sm min-h-[64px] flex flex-col justify-between text-left transition";
+                              // ★ 省略しないので、折り返しの分だけ高さを少し増やす
                               const baseCompact =
-                                "rounded-2xl border p-1 text-[10px] min-h-[52px] flex flex-col justify-between text-left transition";
+                                "rounded-2xl border p-1 text-[10px] min-h-[60px] flex flex-col justify-between text-left transition";
 
                               let bg = "bg-white border-gray-200";
                               if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
@@ -1144,7 +1143,8 @@
                                   ? "text-rose-700"
                                   : "text-gray-900";
 
-                              const displayName = isBlocked ? "利用不可" : st ? (compactMode ? shortenName(st.name, 3) : st.name) : "空";
+                              // ★ 表示名は常にフル（省略禁止）
+                              const displayName = isBlocked ? "利用不可" : st ? st.name : "空";
 
                               return (
                                 <button
@@ -1154,7 +1154,13 @@
                                   title={st ? st.name : ""}
                                 >
                                   <div className="flex items-start justify-between gap-2">
-                                    <div className={`font-semibold ${nameColor} ${compactMode ? "leading-tight" : ""} truncate`}>
+                                    {/* ★ truncate をやめて折り返し表示 */}
+                                    <div
+                                      className={`font-semibold ${nameColor} leading-tight ${
+                                        compactMode ? "text-[10px]" : ""
+                                      } whitespace-normal break-words`}
+                                      style={{ wordBreak: "break-word" }}
+                                    >
                                       {displayName}
                                     </div>
                                     <div className="text-[10px] text-gray-400">
@@ -1250,7 +1256,7 @@
 
                 {/* Roster & Options */}
                 <div className="space-y-4">
-                  <Section title="名簿" subtitle="生徒名と属性を登録。CSV貼り付けもOK。">
+                  <Section title="名簿" subtitle="生徒名と属性を登録。CSV/TSV貼り付けもOK。">
                     <div className="grid grid-cols-1 gap-3">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <div>
@@ -1309,8 +1315,8 @@
                     </div>
 
                     <div className="mt-4">
-                      <div className="text-sm font-medium text-gray-900">CSV貼り付けで一括追加</div>
-                      <div className="text-xs text-gray-500 mt-1">列: 名前, 性別, 視力, 身長, メモ…</div>
+                      <div className="text-sm font-medium text-gray-900">CSV/TSV貼り付けで一括追加</div>
+                      <div className="text-xs text-gray-500 mt-1">列: 名前, 性別, 視力, 身長, メモ…（旧形式: 名前, 視力, 身長, メモ… も可）</div>
                       <div className="mt-2">
                         <TextArea
                           value={csvText}
@@ -1408,9 +1414,9 @@
                     </div>
                   </Section>
 
-                  <Section title="使い方" subtitle="">
+                  <Section title="使い方" subtitle="確認用の最短手順です。">
                     <ol className="list-decimal pl-5 text-sm text-gray-700 space-y-2">
-                      <li>「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
+                      <li>右の「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
                       <li>座席表をタップして、利用不可や固定割当を必要に応じて設定。</li>
                       <li>上部の「席替えを生成」を押す。</li>
                       <li>気に入らなければもう一度生成（履歴が増えるので少しずつ「過去と違う」方向に寄ります）。</li>
