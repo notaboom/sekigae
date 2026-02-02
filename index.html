@@ -20,18 +20,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-      const { useEffect, useMemo, useRef, useState } = React;
-
-      /**
-       * 小学校 席替えアプリ（デモ）
-       * - スマホ/タブレット対応（レスポンシブ）
-       * - 名簿登録（手入力・CSV貼り付け）
-       * - 属性: 性別, 視力(前方優先), 身長(後方優先)
-       * - 座席サイズ（縦×横）指定
-       * - 座席: 固定割当/利用不可
-       * - ランダム配置（制約 + 過去履歴をなるべく避ける + (任意)男女を隣り合わせ）
-       * - 履歴保存（localStorage）
-       */
+      const { useEffect, useMemo, useState } = React;
 
       // ---------- Storage ----------
       const STORAGE_KEY = "seat_shuffle_demo_v1";
@@ -46,7 +35,7 @@
         sameNeighborPenalty: 6,
         clusterPenalty: 2,
 
-        // 男女をなるべく隣り合わせにする（ON/OFF）
+        // デフォルトON
         preferMixedGender: true,
         // 男女混在の重み（バーで調整）
         genderMixWeight: 3,
@@ -68,34 +57,34 @@
         return JSON.parse(JSON.stringify(obj));
       }
 
-function normalizeGender(raw) {
-  const s = (raw || "").toString().trim().toLowerCase();
-  if (!s) return "unknown";
+      // female に male が含まれる問題を避けるため、includes は使わず厳密判定
+      function normalizeGender(raw) {
+        const s = (raw || "").toString().trim().toLowerCase();
+        if (!s) return "unknown";
 
-  // 先に female 系を判定（female に male が含まれる問題の回避）
-  if (
-    s === "f" ||
-    s === "female" ||
-    s === "woman" ||
-    s === "girl" ||
-    s === "女" ||
-    s === "女性" ||
-    s === "女子"
-  ) return "female";
+        // 先に female 系
+        if (
+          s === "f" ||
+          s === "female" ||
+          s === "woman" ||
+          s === "girl" ||
+          s === "女" ||
+          s === "女性" ||
+          s === "女子"
+        ) return "female";
 
-  if (
-    s === "m" ||
-    s === "male" ||
-    s === "man" ||
-    s === "boy" ||
-    s === "男" ||
-    s === "男性" ||
-    s === "男子"
-  ) return "male";
+        if (
+          s === "m" ||
+          s === "male" ||
+          s === "man" ||
+          s === "boy" ||
+          s === "男" ||
+          s === "男性" ||
+          s === "男子"
+        ) return "male";
 
-  return "unknown";
-}
-
+        return "unknown";
+      }
 
       function normalizeStudent(st) {
         const gender = st?.gender ?? st?.sex ?? "unknown";
@@ -114,11 +103,13 @@ function normalizeGender(raw) {
         const pairs = new Set();
         const h = grid.length;
         const w = grid[0]?.length || 0;
+
         const addPair = (a, b) => {
           if (!a || !b) return;
           const k = a < b ? `${a}|${b}` : `${b}|${a}`;
           pairs.add(k);
         };
+
         for (let r = 0; r < h; r++) {
           for (let c = 0; c < w; c++) {
             const me = grid[r][c];
@@ -145,7 +136,9 @@ function normalizeGender(raw) {
 
         const parseVision = (v) => {
           const visionRaw = (v || "").toLowerCase();
-          return visionRaw.includes("poor") || visionRaw.includes("悪") || visionRaw.includes("弱") ? "poor" : "normal";
+          return visionRaw.includes("poor") || visionRaw.includes("悪") || visionRaw.includes("弱")
+            ? "poor"
+            : "normal";
         };
 
         const parseHeight = (h) => {
@@ -157,6 +150,9 @@ function normalizeGender(raw) {
           const cols = line.split(/\t|,/).map((c) => c.trim());
           const name = cols[0];
           if (!name) continue;
+
+          // ヘッダー行は無視
+          if (name === "名前" || name.toLowerCase() === "name") continue;
 
           // 2列目が性別っぽいか判定
           const g2 = normalizeGender(cols[1]);
@@ -222,7 +218,10 @@ function normalizeGender(raw) {
         // Capacity check
         const capacity = fixedSeatToStudent.size + openSeatKeys.length;
         if (capacity < students.length) {
-          return { ok: false, error: `座席数が足りません（利用可能 ${capacity}席 / 生徒 ${students.length}人）` };
+          return {
+            ok: false,
+            error: `座席数が足りません（利用可能 ${capacity}席 / 生徒 ${students.length}人）`,
+          };
         }
 
         // Precompute history penalties
@@ -284,7 +283,7 @@ function normalizeGender(raw) {
             if (pastPairs.has(p)) score -= options.sameNeighborPenalty;
           }
 
-          // 4) mild entropy: avoid poor-poor clustering
+          // 4) avoid poor-poor clustering (right & down)
           for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
               const sid = grid[r][c];
@@ -303,38 +302,24 @@ function normalizeGender(raw) {
             }
           }
 
-          // 5) (任意) 男女をなるべく隣り合わせ
+          // 5) (任意) 男女をなるべく隣り合わせ（2列ごとのペアで判定）
+          // 例: (1,2列) (3,4列) ... を同一行で評価。ペアをまたぐ隣や前後は評価しない。
           if (options.preferMixedGender && options.genderMixWeight > 0) {
             for (let r = 0; r < rows; r++) {
-              for (let c = 0; c < cols; c++) {
+              for (let c = 0; c < cols; c += 2) {
                 const a = grid[r][c];
-                if (!a) continue;
+                const b = c + 1 < cols ? grid[r][c + 1] : null;
+
+                if (!a || !b) continue;
+
                 const A = studentsById.get(a);
-                if (!A || A.gender === "unknown") continue;
+                const B = studentsById.get(b);
+                if (!A || !B) continue;
 
-                // right
-                if (c + 1 < cols) {
-                  const b = grid[r][c + 1];
-                  if (b) {
-                    const B = studentsById.get(b);
-                    if (B && B.gender !== "unknown") {
-                      if (A.gender === B.gender) score -= options.genderMixWeight;
-                      else score += options.genderMixWeight * 0.25;
-                    }
-                  }
-                }
+                if (A.gender === "unknown" || B.gender === "unknown") continue;
 
-                // down
-                if (r + 1 < rows) {
-                  const b = grid[r + 1][c];
-                  if (b) {
-                    const B = studentsById.get(b);
-                    if (B && B.gender !== "unknown") {
-                      if (A.gender === B.gender) score -= options.genderMixWeight;
-                      else score += options.genderMixWeight * 0.25;
-                    }
-                  }
-                }
+                if (A.gender === B.gender) score -= options.genderMixWeight;
+                else score += options.genderMixWeight * 0.25;
               }
             }
           }
@@ -374,7 +359,7 @@ function normalizeGender(raw) {
         };
 
         const buildPlacementOrder = (arr) => {
-          // 視力poorを前優先のため先に。性別混在もONなら交互配置を初期解で少し意識する。
+          // 視力poorを前優先のため先に。男女混在ONなら交互配置を初期解で少し意識。
           const poor = arr.filter((s) => s.vision === "poor");
           const rest = arr.filter((s) => s.vision !== "poor");
 
@@ -384,10 +369,10 @@ function normalizeGender(raw) {
             const unknown = randomShuffle(list.filter((s) => s.gender === "unknown"));
 
             const out = [];
-            // 交互にできるだけ並べる
             let i = 0;
             let j = 0;
             let turn = males.length >= females.length ? "m" : "f";
+
             while (i < males.length || j < females.length) {
               if (turn === "m") {
                 if (i < males.length) out.push(males[i++]);
@@ -396,7 +381,6 @@ function normalizeGender(raw) {
                 if (j < females.length) out.push(females[j++]);
                 turn = "m";
               }
-              // どちらか尽きたら残りを詰める
               if (i >= males.length) turn = "f";
               if (j >= females.length) turn = "m";
               if (i >= males.length && j >= females.length) break;
@@ -413,6 +397,7 @@ function normalizeGender(raw) {
         const placeMovable = (grid, order) => {
           const priority = buildPlacementOrder(order);
 
+          // open seats sorted by frontness
           const openSeatsSorted = openSeatKeys
             .slice()
             .sort((a, b) => {
@@ -645,7 +630,7 @@ function normalizeGender(raw) {
         const [newNotes, setNewNotes] = useState("");
 
         const [options, setOptions] = useState(DEFAULT_OPTIONS);
-        const [optionsOpen, setOptionsOpen] = useState(false); // デフォルトは畳む
+        const [optionsOpen, setOptionsOpen] = useState(false); // デフォルト畳む
 
         // load
         useEffect(() => {
@@ -662,9 +647,7 @@ function normalizeGender(raw) {
             if (data.history) setHistory(data.history);
             if (data.current) setCurrent(data.current);
 
-            if (data.options) {
-              setOptions({ ...DEFAULT_OPTIONS, ...data.options });
-            }
+            if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
           } catch (e) {
             console.warn(e);
           }
@@ -823,7 +806,6 @@ function normalizeGender(raw) {
             if (!studentIdOrEmpty) {
               delete next[sk];
             } else {
-              // 同じ生徒を複数席に固定しない
               for (const k of Object.keys(next)) if (next[k] === studentIdOrEmpty) delete next[k];
               next[sk] = studentIdOrEmpty;
             }
@@ -832,15 +814,7 @@ function normalizeGender(raw) {
         };
 
         const generate = () => {
-          const res = generateSeating({
-            students,
-            rows,
-            cols,
-            blocked,
-            fixedMap,
-            history,
-            options,
-          });
+          const res = generateSeating({ students, rows, cols, blocked, fixedMap, history, options });
           if (!res.ok) {
             alert(res.error);
             return;
@@ -880,7 +854,7 @@ function normalizeGender(raw) {
           if (current?.id === id) setCurrent(null);
         };
 
-        // 変更1: 表示文言を「情報を保存」「情報を読込」
+        // 表示文言は「情報を保存」「情報を読込」
         const exportJSON = () => {
           const data = {
             students,
@@ -917,10 +891,7 @@ function normalizeGender(raw) {
           if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
         };
 
-        const onSeatClick = (r, c) => {
-          const { sk } = seatInfoFor(r, c);
-          setSelectedSeat(sk);
-        };
+        const onSeatClick = (r, c) => setSelectedSeat(seatKey(r, c));
 
         const genderLabel = (g) => (g === "male" ? "男" : g === "female" ? "女" : "未");
         const genderTone = (g) => (g === "male" ? "male" : g === "female" ? "female" : "unknown");
@@ -1030,7 +1001,9 @@ function normalizeGender(raw) {
                                 <button key={sk} onClick={() => onSeatClick(r, c)} className={`${base} ${bg} ${ring}`}>
                                   <div className="flex items-start justify-between gap-2">
                                     <div className={`font-semibold ${nameColor}`}>{isBlocked ? "利用不可" : st ? st.name : "空"}</div>
-                                    <div className="text-[10px] text-gray-400">{r + 1}-{c + 1}</div>
+                                    <div className="text-[10px] text-gray-400">
+                                      {r + 1}-{c + 1}
+                                    </div>
                                   </div>
 
                                   <div className="flex flex-wrap gap-1 mt-2">
@@ -1186,7 +1159,7 @@ function normalizeGender(raw) {
                           value={csvText}
                           onChange={setCsvText}
                           rows={5}
-                          placeholder={`例\n佐藤,男,poor,normal,メガネ\n鈴木,女,normal,tall,`}
+                          placeholder={`例\n佐藤,male,poor,normal,メガネ\n鈴木,female,normal,tall,`}
                         />
                       </div>
                       <div className="mt-2 flex gap-2">
@@ -1226,7 +1199,6 @@ function normalizeGender(raw) {
                     </div>
                   </Section>
 
-                  {/* 変更2: 生成オプションはバーに & デフォルトで畳む */}
                   <Section
                     title="生成オプション"
                     subtitle="男女の隣り合わせON/OFFはここで切替。数値調整（バー）は『詳細』で開きます。"
@@ -1241,10 +1213,10 @@ function normalizeGender(raw) {
                         <Toggle
                           checked={options.preferMixedGender}
                           onChange={(v) => setOptions((o) => ({ ...o, preferMixedGender: v }))}
-                          label="男女をなるべく隣り合わせにする"
+                          label="男女をなるべく隣り合わせにする（2列ごとのペアで判定）"
                         />
                         <div className="text-xs text-gray-500 mt-1">
-                          ONにすると、隣同士（左右・前後）が同性になりにくいように評価します（完全保証ではなく“なるべく”です）。
+                          ONにすると、同じ行の「(1,2列)(3,4列)…」のペア内で同性になりにくいように評価します（完全保証ではなく“なるべく”です）。
                         </div>
                       </div>
 
@@ -1263,77 +1235,17 @@ function normalizeGender(raw) {
                         </div>
                       ) : (
                         <div className="space-y-3">
-                          <RangeRow
-                            label="試行回数"
-                            value={options.trials}
-                            min={10}
-                            max={400}
-                            step={10}
-                            onChange={(v) => setOptions((o) => ({ ...o, trials: v }))}
-                          />
-                          <RangeRow
-                            label="改善ステップ"
-                            value={options.hillSteps}
-                            min={20}
-                            max={600}
-                            step={10}
-                            onChange={(v) => setOptions((o) => ({ ...o, hillSteps: v }))}
-                          />
-                          <RangeRow
-                            label="履歴参照数"
-                            value={options.historyWindow}
-                            min={1}
-                            max={30}
-                            step={1}
-                            onChange={(v) => setOptions((o) => ({ ...o, historyWindow: v }))}
-                          />
-                          <RangeRow
-                            label="視力の重み（前方優先）"
-                            value={options.visionWeight}
-                            min={0}
-                            max={10}
-                            step={1}
-                            onChange={(v) => setOptions((o) => ({ ...o, visionWeight: v }))}
-                          />
-                          <RangeRow
-                            label="同席ペナルティ"
-                            value={options.sameSeatPenalty}
-                            min={0}
-                            max={20}
-                            step={1}
-                            onChange={(v) => setOptions((o) => ({ ...o, sameSeatPenalty: v }))}
-                          />
-                          <RangeRow
-                            label="同隣ペナルティ"
-                            value={options.sameNeighborPenalty}
-                            min={0}
-                            max={20}
-                            step={1}
-                            onChange={(v) => setOptions((o) => ({ ...o, sameNeighborPenalty: v }))}
-                          />
+                          <RangeRow label="試行回数" value={options.trials} min={10} max={400} step={10} onChange={(v) => setOptions((o) => ({ ...o, trials: v }))} />
+                          <RangeRow label="改善ステップ" value={options.hillSteps} min={20} max={600} step={10} onChange={(v) => setOptions((o) => ({ ...o, hillSteps: v }))} />
+                          <RangeRow label="履歴参照数" value={options.historyWindow} min={1} max={30} step={1} onChange={(v) => setOptions((o) => ({ ...o, historyWindow: v }))} />
+                          <RangeRow label="視力の重み（前方優先）" value={options.visionWeight} min={0} max={10} step={1} onChange={(v) => setOptions((o) => ({ ...o, visionWeight: v }))} />
+                          <RangeRow label="同席ペナルティ" value={options.sameSeatPenalty} min={0} max={20} step={1} onChange={(v) => setOptions((o) => ({ ...o, sameSeatPenalty: v }))} />
+                          <RangeRow label="同隣ペナルティ" value={options.sameNeighborPenalty} min={0} max={20} step={1} onChange={(v) => setOptions((o) => ({ ...o, sameNeighborPenalty: v }))} />
                           {options.preferMixedGender ? (
-                            <RangeRow
-                              label="男女混在の重み"
-                              value={options.genderMixWeight}
-                              min={0}
-                              max={10}
-                              step={1}
-                              onChange={(v) => setOptions((o) => ({ ...o, genderMixWeight: v }))}
-                            />
+                            <RangeRow label="男女混在の重み" value={options.genderMixWeight} min={0} max={10} step={1} onChange={(v) => setOptions((o) => ({ ...o, genderMixWeight: v }))} />
                           ) : (
                             <div className="text-xs text-gray-500">※「男女をなるべく隣り合わせ」にすると、この重みが有効になります。</div>
                           )}
-
-                          <div className="p-3 border border-gray-200 rounded-2xl bg-gray-50 text-xs text-gray-700 leading-relaxed">
-                            <div className="font-semibold">ロジック概要</div>
-                            <ul className="list-disc pl-4 mt-1 space-y-1">
-                              <li>固定席・利用不可席を反映した上で、残りの生徒を配置します。</li>
-                              <li>視力配慮（poor）は前方（rowが小さい）ほど高得点。</li>
-                              <li>直近の履歴を見て、同じ席・同じ隣ペアをペナルティ。</li>
-                              <li>（任意）男女混在を評価して、同性隣接を減らす方向に寄せます。</li>
-                              <li>ランダム試行＋入れ替え改善（ヒルクライム）でスコア最大化。</li>
-                            </ul>
-                          </div>
                         </div>
                       )}
                     </div>
