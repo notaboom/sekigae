@@ -15,8 +15,12 @@
     <!-- JSXをブラウザで動かすためのBabel（デモ用途） -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- （保険）numberスピナー無効：他で number を使っても崩れにくく -->
     <style>
+      /* 右側UIが細くなっても「縦書きっぽく」ならないようにするための保険 */
+      .no-vert-squeeze {
+        word-break: keep-all;
+      }
+      /* numberのスピナーは使わない（-+は自前ボタン） */
       input[type="number"]::-webkit-outer-spin-button,
       input[type="number"]::-webkit-inner-spin-button {
         -webkit-appearance: none;
@@ -344,7 +348,6 @@
           }
 
           // 5) (任意) 男女をなるべく隣り合わせ（2列ごとのペアで判定）
-          // 例: (1,2列) (3,4列) ... を同一行で評価。ペアをまたぐ隣や前後は評価しない。
           if (options.preferMixedGender && options.genderMixWeight > 0) {
             for (let r = 0; r < rows; r++) {
               for (let c = 0; c < cols; c += 2) {
@@ -400,7 +403,6 @@
         };
 
         const buildPlacementOrder = (arr) => {
-          // 視力poorを前優先のため先に。男女混在ONなら交互配置を初期解で少し意識。
           const poor = arr.filter((s) => s.vision === "poor");
           const rest = arr.filter((s) => s.vision !== "poor");
 
@@ -438,7 +440,6 @@
         const placeMovable = (grid, order) => {
           const priority = buildPlacementOrder(order);
 
-          // open seats sorted by frontness
           const openSeatsSorted = openSeatKeys
             .slice()
             .sort((a, b) => {
@@ -473,7 +474,7 @@
               const sk = seatKey(r, c);
               if (blocked.has(sk)) continue;
               if (fixedSeatToStudent.has(sk)) continue;
-              pos.push([r, c]); // nullも含める（余席がある場合の入れ替え用）
+              pos.push([r, c]); // nullも含める
             }
           }
           return pos;
@@ -535,11 +536,6 @@
         );
       }
 
-      /**
-       * ✅ 修正：スマホでヘッダーが潰れて「縦書き」になる問題を回避
-       * - ヘッダーを sm 未満では縦積み（flex-col）
-       * - right を sm 未満では幅100%で下段に回す
-       */
       function Section({ title, subtitle, children, right }) {
         return (
           <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
@@ -555,7 +551,7 @@
         );
       }
 
-      function Button({ children, onClick, variant = "primary", disabled, title }) {
+      function Button({ children, onClick, variant = "primary", disabled, title, className = "" }) {
         const base =
           "px-3 py-2 rounded-xl text-sm font-medium transition active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed";
         const styles =
@@ -567,16 +563,12 @@
             ? "bg-rose-600 text-white hover:bg-rose-500"
             : "bg-gray-100 text-gray-900 hover:bg-gray-200";
         return (
-          <button className={`${base} ${styles}`} onClick={onClick} disabled={disabled} title={title}>
+          <button className={`${base} ${styles} ${className}`} onClick={onClick} disabled={disabled} title={title} type="button">
             {children}
           </button>
         );
       }
 
-      /**
-       * ✅ 修正：iPhoneで type="number" が (−/＋) ステッパーUIになり横幅を壊すので、
-       * rows/cols は type="text" + inputMode="numeric" で使えるように拡張
-       */
       function Input({ value, onChange, type = "text", min, max, step, inputMode, pattern }) {
         return (
           <input
@@ -659,6 +651,70 @@
                 {suffix}
               </span>
             </div>
+          </div>
+        );
+      }
+
+      // ✅ iPhoneで崩れない「- / 入力 / +」の数値コントロール
+      // 入力中は文字列で保持 → blur/Enter で数値に確定（カーソル飛び防止）
+      function StepperNumber({ value, onChange, min = 1, max = 15, ariaLabel }) {
+        const [text, setText] = useState(String(value));
+
+        useEffect(() => {
+          setText(String(value));
+        }, [value]);
+
+        const clamp = (n) => Math.max(min, Math.min(max, n));
+
+        const commit = (raw) => {
+          const digits = String(raw ?? "").replace(/[^\d]/g, "");
+          if (!digits) {
+            onChange(clamp(min));
+            return;
+          }
+          const n = parseInt(digits, 10);
+          if (!Number.isFinite(n)) {
+            onChange(clamp(min));
+            return;
+          }
+          onChange(clamp(n));
+        };
+
+        const dec = () => onChange(clamp(value - 1));
+        const inc = () => onChange(clamp(value + 1));
+
+        return (
+          <div className="inline-flex items-center rounded-xl border border-gray-200 bg-white overflow-hidden">
+            <button
+              type="button"
+              className="w-10 h-10 grid place-items-center text-gray-700 bg-gray-50 hover:bg-gray-100 active:bg-gray-200 select-none"
+              onClick={dec}
+              aria-label={`${ariaLabel}を減らす`}
+            >
+              −
+            </button>
+            <input
+              className="w-14 h-10 text-center text-sm outline-none"
+              value={text}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              aria-label={ariaLabel}
+              onChange={(e) => setText(e.target.value)}
+              onBlur={() => commit(text)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.currentTarget.blur();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="w-10 h-10 grid place-items-center text-gray-700 bg-gray-50 hover:bg-gray-100 active:bg-gray-200 select-none"
+              onClick={inc}
+              aria-label={`${ariaLabel}を増やす`}
+            >
+              +
+            </button>
           </div>
         );
       }
@@ -1037,7 +1093,9 @@
               <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
                 <div>
                   <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
-                  <p className="text-sm text-gray-600 mt-1">名簿・属性・座席制約・ランダム配置・履歴を端末内の localStorage に保存。スマホ/タブレットでもブラウザで動きます。</p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    名簿・属性・座席制約・ランダム配置・履歴を端末内の localStorage に保存。スマホ/タブレットでもブラウザで動きます。
+                  </p>
                   <div className="flex flex-wrap gap-2 mt-2">
                     <Pill tone="info">生徒 {students.length}人</Pill>
                     <Pill tone={countOpenSeats >= students.length ? "good" : "bad"}>利用可能 {countOpenSeats}席</Pill>
@@ -1091,48 +1149,20 @@
                     title="座席表"
                     subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。iPhone等で列数が多い場合は『横幅に合わせて縮小』で横スクロールを減らします。前回と同じ左右ペアがある席は赤枠＋『左右(前回同じ)』で表示。"
                     right={
-                      /**
-                       * ✅ 修正：スマホで右側UIが横に伸びて左側テキストを潰すのを防ぐ
-                       * - 右側は w-full で下段へ回りやすく
-                       * - 入力部は flex-wrap で折り返し
-                       * ✅ 追加修正：rows/cols は number をやめて text(numeric) にし、iPhoneの(−/＋)UIで崩れるのを防ぐ
-                       */
-                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 w-full">
-                        <label className="flex items-center gap-2 text-xs text-gray-700">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 w-full no-vert-squeeze">
+                        <label className="flex items-center gap-2 text-xs text-gray-700 whitespace-nowrap">
                           <input type="checkbox" checked={fitToScreen} onChange={(e) => setFitToScreen(e.target.checked)} />
                           横幅に合わせる
                         </label>
 
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="text-xs text-gray-500">縦×横</div>
+                        <div className="flex items-center gap-2 flex-wrap min-w-[220px]">
+                          <div className="text-xs text-gray-500 whitespace-nowrap">縦×横</div>
 
-                          <div className="w-16">
-                            <Input
-                              type="text"
-                              inputMode="numeric"
-                              pattern="[0-9]*"
-                              value={rows}
-                              onChange={(v) => {
-                                const n = parseInt(String(v).replace(/[^\d]/g, ""), 10);
-                                setRows(Math.max(1, Math.min(15, Number.isFinite(n) ? n : 1)));
-                              }}
-                            />
-                          </div>
+                          <StepperNumber value={rows} onChange={setRows} min={1} max={15} ariaLabel="縦" />
 
-                          <div className="text-xs text-gray-500">×</div>
+                          <div className="text-xs text-gray-500 whitespace-nowrap">×</div>
 
-                          <div className="w-16">
-                            <Input
-                              type="text"
-                              inputMode="numeric"
-                              pattern="[0-9]*"
-                              value={cols}
-                              onChange={(v) => {
-                                const n = parseInt(String(v).replace(/[^\d]/g, ""), 10);
-                                setCols(Math.max(1, Math.min(15, Number.isFinite(n) ? n : 1)));
-                              }}
-                            />
-                          </div>
+                          <StepperNumber value={cols} onChange={setCols} min={1} max={15} ariaLabel="横" />
                         </div>
                       </div>
                     }
@@ -1199,6 +1229,7 @@
                                   onClick={() => onSeatClick(r, c)}
                                   className={`${compactMode ? baseCompact : base} ${bg} ${ring} ${repeatOutline}`}
                                   title={st ? st.name : ""}
+                                  type="button"
                                 >
                                   <div className="flex items-start justify-between gap-2">
                                     <div className={`font-semibold ${nameColor} ${compactMode ? "leading-tight" : ""} truncate`}>
