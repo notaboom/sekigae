@@ -3,43 +3,75 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>席替えアプリ - 修正版</title>
+    <title>席替えアプリ</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
+
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   </head>
+
   <body class="bg-gray-50">
     <div id="root"></div>
 
     <script type="text/babel">
       const { useEffect, useMemo, useState, useRef } = React;
 
-      // ---------- Constants & Utils ----------
+      // ---------- Storage ----------
       const STORAGE_KEY = "sekigae_app_v1";
+      const LEGACY_KEYS = ["seat_shuffle_demo_v1"];
+
       const DEFAULT_OPTIONS = {
-        trials: 80, hillSteps: 120, historyWindow: 6, visionWeight: 3,
-        heightWeight: 1, sameSeatPenalty: 7, sameNeighborPenalty: 6, clusterPenalty: 2,
-        preferMixedGender: true, genderMixWeight: 3,
+        trials: 80,
+        hillSteps: 120,
+        historyWindow: 6,
+        visionWeight: 3,
+        heightWeight: 1,
+        sameSeatPenalty: 7,
+        sameNeighborPenalty: 6,
+        clusterPenalty: 2,
+
+        preferMixedGender: true,
+        genderMixWeight: 3,
       };
 
-      function uid() { return Math.random().toString(16).slice(2) + Date.now().toString(16); }
-      function seatKey(r, c) { return `${r}-${c}`; }
-      function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+      function uid() {
+        return Math.random().toString(16).slice(2) + Date.now().toString(16);
+      }
+
+      function seatDistanceToFront(row) {
+        return row;
+      }
+
+      function seatKey(r, c) {
+        return `${r}-${c}`;
+      }
+
+      function deepClone(obj) {
+        return JSON.parse(JSON.stringify(obj));
+      }
 
       function normalizeGender(raw) {
         const s = (raw || "").toString().trim().toLowerCase();
         if (!s) return "unknown";
-        if (["f", "female", "woman", "girl", "女", "女性", "女子"].includes(s)) return "female";
-        if (["m", "male", "man", "boy", "男", "男性", "男子"].includes(s)) return "male";
+
+        if (s === "f" || s === "female" || s === "woman" || s === "girl" || s === "女" || s === "女性" || s === "女子")
+          return "female";
+
+        if (s === "m" || s === "male" || s === "man" || s === "boy" || s === "男" || s === "男性" || s === "男子")
+          return "male";
+
         return "unknown";
       }
 
       function normalizeStudent(st) {
+        const gender = st?.gender ?? st?.sex ?? "unknown";
         return {
           id: st?.id ?? uid(),
           name: st?.name ?? "",
-          gender: normalizeGender(st?.gender ?? st?.sex),
+          gender: normalizeGender(gender),
           vision: st?.vision === "poor" ? "poor" : "normal",
           height: st?.height === "tall" ? "tall" : "normal",
           notes: st?.notes ?? "",
@@ -50,55 +82,412 @@
         const pairs = new Set();
         const h = grid.length;
         const w = grid[0]?.length || 0;
+
         const addPair = (a, b) => {
           if (!a || !b) return;
-          pairs.add(a < b ? `${a}|${b}` : `${b}|${a}`);
+          const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+          pairs.add(k);
         };
+
         for (let r = 0; r < h; r++) {
           for (let c = 0; c < w; c++) {
-            if (c + 1 < w) addPair(grid[r][c], grid[r][c + 1]);
-            if (r + 1 < h) addPair(grid[r][c], grid[r + 1][c]);
+            const me = grid[r][c];
+            if (c + 1 < w) addPair(me, grid[r][c + 1]);
+            if (r + 1 < h) addPair(me, grid[r + 1][c]);
           }
         }
         return pairs;
       }
 
-      // --- Size Cleanup Logic ---
-      function pruneFixedMapForSize(fixedMap, rows, cols) {
-        const next = {};
-        for (const [k, v] of Object.entries(fixedMap || {})) {
-          const [r, c] = k.split("-").map(Number);
-          if (r >= 0 && r < rows && c >= 0 && c < cols) next[k] = v;
+      function horizontalPairsFromGrid(grid) {
+        const pairs = new Set();
+        const h = grid.length;
+        const w = grid[0]?.length || 0;
+
+        for (let r = 0; r < h; r++) {
+          for (let c = 0; c + 1 < w; c++) {
+            const a = grid[r][c];
+            const b = grid[r][c + 1];
+            if (!a || !b) continue;
+            const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+            pairs.add(k);
+          }
         }
-        return next;
+        return pairs;
       }
 
-      function pruneBlockedForSize(blockedSet, rows, cols) {
-        const next = new Set();
-        for (const k of blockedSet || []) {
-          const [r, c] = (k || "").split("-").map(Number);
-          if (r >= 0 && r < rows && c >= 0 && c < cols) next.add(k);
+      function getPrevHistoryItem(history, current) {
+        if (!current || !Array.isArray(history) || history.length < 2) return null;
+        const idx = history.findIndex((h) => h?.id === current?.id);
+        if (idx > 0) return history[idx - 1];
+        return history[history.length - 2] || null;
+      }
+
+      // ---------- Parsing ----------
+      function parseCSVLike(text) {
+        const lines = text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+
+        const out = [];
+
+        const parseVision = (v) => {
+          const visionRaw = (v || "").toLowerCase();
+          return visionRaw.includes("poor") || visionRaw.includes("悪") || visionRaw.includes("弱") ? "poor" : "normal";
+        };
+
+        const parseHeight = (h) => {
+          const heightRaw = (h || "").toLowerCase();
+          return heightRaw.includes("tall") || heightRaw.includes("高") ? "tall" : "normal";
+        };
+
+        for (const line of lines) {
+          const cols = line.split(/\t|,/).map((c) => c.trim());
+          const name = cols[0];
+          if (!name) continue;
+          if (name === "名前" || name.toLowerCase() === "name") continue;
+
+          const g2 = normalizeGender(cols[1]);
+          const secondIsGender = g2 !== "unknown";
+
+          let gender = "unknown";
+          let vision = "normal";
+          let height = "normal";
+          let notes = "";
+
+          if (secondIsGender) {
+            gender = g2;
+            vision = parseVision(cols[2]);
+            height = parseHeight(cols[3]);
+            notes = cols.slice(4).join(" ");
+          } else {
+            gender = "unknown";
+            vision = parseVision(cols[1]);
+            height = parseHeight(cols[2]);
+            notes = cols.slice(3).join(" ");
+          }
+
+          out.push(
+            normalizeStudent({
+              id: uid(),
+              name,
+              gender,
+              vision,
+              height,
+              notes,
+            })
+          );
         }
-        return next;
+
+        return out;
+      }
+
+      // ---------- Optimization ----------
+      function generateSeating({ students, rows, cols, blocked, fixedMap, history, options }) {
+        const studentsById = new Map(students.map((s) => [s.id, s]));
+
+        const openSeatKeys = [];
+        const fixedSeatToStudent = new Map();
+        const fixedStudentIds = new Set();
+
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const k = seatKey(r, c);
+            if (blocked.has(k)) continue;
+            if (fixedMap[k]) {
+              fixedSeatToStudent.set(k, fixedMap[k]);
+              fixedStudentIds.add(fixedMap[k]);
+            } else {
+              openSeatKeys.push(k);
+            }
+          }
+        }
+
+        const movable = students.filter((s) => !fixedStudentIds.has(s.id));
+
+        const capacity = fixedSeatToStudent.size + openSeatKeys.length;
+        if (capacity < students.length) {
+          return {
+            ok: false,
+            error: `座席数が足りません（利用可能 ${capacity}席 / 生徒 ${students.length}人）`,
+          };
+        }
+
+        const lastN = history.slice(-Math.min(history.length, options.historyWindow));
+        const pastSeatByStudent = new Map();
+        const pastPairs = new Set();
+
+        for (const h of lastN) {
+          if (h?.grid) {
+            for (let r = 0; r < h.grid.length; r++) {
+              for (let c = 0; c < h.grid[r].length; c++) {
+                const sid = h.grid[r][c];
+                if (!sid) continue;
+                const sk = seatKey(r, c);
+                if (!pastSeatByStudent.has(sid)) pastSeatByStudent.set(sid, new Set());
+                pastSeatByStudent.get(sid).add(sk);
+              }
+            }
+          }
+          if (h?.pairs) {
+            for (const p of h.pairs) pastPairs.add(p);
+          }
+        }
+
+        const scoreGrid = (grid) => {
+          let score = 0;
+
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const sid = grid[r][c];
+              if (!sid) continue;
+              const st = studentsById.get(sid);
+              if (!st) continue;
+
+              if (st.vision === "poor") score += options.visionWeight * (rows - 1 - seatDistanceToFront(r));
+              if (st.height === "tall") score += options.heightWeight * seatDistanceToFront(r);
+            }
+          }
+
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const sid = grid[r][c];
+              if (!sid) continue;
+              const sk = seatKey(r, c);
+              const set = pastSeatByStudent.get(sid);
+              if (set && set.has(sk)) score -= options.sameSeatPenalty;
+            }
+          }
+
+          const pairs = adjacencyPairsFromGrid(grid);
+          for (const p of pairs) {
+            if (pastPairs.has(p)) score -= options.sameNeighborPenalty;
+          }
+
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const sid = grid[r][c];
+              if (!sid) continue;
+              const st = studentsById.get(sid);
+              if (!st || st.vision !== "poor") continue;
+
+              const right = c + 1 < cols ? grid[r][c + 1] : null;
+              const down = r + 1 < rows ? grid[r + 1][c] : null;
+
+              const stR = right ? studentsById.get(right) : null;
+              const stD = down ? studentsById.get(down) : null;
+
+              if (stR?.vision === "poor") score -= options.clusterPenalty;
+              if (stD?.vision === "poor") score -= options.clusterPenalty;
+            }
+          }
+
+          if (options.preferMixedGender && options.genderMixWeight > 0) {
+            for (let r = 0; r < rows; r++) {
+              for (let c = 0; c < cols; c += 2) {
+                const a = grid[r][c];
+                const b = c + 1 < cols ? grid[r][c + 1] : null;
+
+                if (!a || !b) continue;
+
+                const A = studentsById.get(a);
+                const B = studentsById.get(b);
+                if (!A || !B) continue;
+
+                if (A.gender === "unknown" || B.gender === "unknown") continue;
+
+                if (A.gender === B.gender) score -= options.genderMixWeight;
+                else score += options.genderMixWeight * 0.25;
+              }
+            }
+          }
+
+          return { score, pairs };
+        };
+
+        const buildEmptyGrid = () => {
+          const grid = Array.from({ length: rows }, () => Array.from({ length: cols }, () => null));
+          for (const [sk, sid] of fixedSeatToStudent.entries()) {
+            const [r, c] = sk.split("-").map((x) => Number(x));
+            if (r >= 0 && c >= 0 && r < rows && c < cols && !blocked.has(sk)) grid[r][c] = sid;
+          }
+          return grid;
+        };
+
+        const randomShuffle = (arr) => {
+          const a = arr.slice();
+          for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+          }
+          return a;
+        };
+
+        const buildPlacementOrder = (arr) => {
+          const poor = arr.filter((s) => s.vision === "poor");
+          const rest = arr.filter((s) => s.vision !== "poor");
+
+          const makeInterleave = (list) => {
+            const males = randomShuffle(list.filter((s) => s.gender === "male"));
+            const females = randomShuffle(list.filter((s) => s.gender === "female"));
+            const unknown = randomShuffle(list.filter((s) => s.gender === "unknown"));
+
+            const out = [];
+            let i = 0,
+              j = 0;
+            let turn = males.length >= females.length ? "m" : "f";
+
+            while (i < males.length || j < females.length) {
+              if (turn === "m") {
+                if (i < males.length) out.push(males[i++]);
+                turn = "f";
+              } else {
+                if (j < females.length) out.push(females[j++]);
+                turn = "m";
+              }
+              if (i >= males.length) turn = "f";
+              if (j >= females.length) turn = "m";
+              if (i >= males.length && j >= females.length) break;
+            }
+            return out.concat(unknown);
+          };
+
+          if (options.preferMixedGender) return makeInterleave(poor).concat(makeInterleave(rest));
+          return randomShuffle(poor).concat(randomShuffle(rest));
+        };
+
+        const placeMovable = (grid, order) => {
+          const priority = buildPlacementOrder(order);
+
+          const openSeatsSorted = openSeatKeys.slice().sort((a, b) => {
+            const [ar, ac] = a.split("-").map(Number);
+            const [br, bc] = b.split("-").map(Number);
+            if (ar !== br) return ar - br;
+            return ac - bc;
+          });
+
+          let idx = 0;
+          for (const sk of openSeatsSorted) {
+            if (idx >= priority.length) break;
+            const [r, c] = sk.split("-").map(Number);
+            grid[r][c] = priority[idx].id;
+            idx++;
+          }
+          return grid;
+        };
+
+        const swapPositions = (grid, a, b) => {
+          const [ar, ac] = a;
+          const [br, bc] = b;
+          const tmp = grid[ar][ac];
+          grid[ar][ac] = grid[br][bc];
+          grid[br][bc] = tmp;
+        };
+
+        const movablePositions = (grid) => {
+          const pos = [];
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const sk = seatKey(r, c);
+              if (blocked.has(sk)) continue;
+              if (fixedSeatToStudent.has(sk)) continue;
+              pos.push([r, c]);
+            }
+          }
+          return pos;
+        };
+
+        const trials = options.trials;
+        const hillSteps = options.hillSteps;
+        let best = null;
+
+        for (let t = 0; t < trials; t++) {
+          let grid = buildEmptyGrid();
+          const shuffled = randomShuffle(movable);
+          grid = placeMovable(grid, shuffled);
+
+          const posList = movablePositions(grid);
+          let currentEval = scoreGrid(grid);
+
+          for (let step = 0; step < hillSteps; step++) {
+            const i = Math.floor(Math.random() * posList.length);
+            const j = Math.floor(Math.random() * posList.length);
+            if (i === j) continue;
+
+            swapPositions(grid, posList[i], posList[j]);
+            const nextEval = scoreGrid(grid);
+
+            if (nextEval.score >= currentEval.score) {
+              currentEval = nextEval;
+            } else {
+              swapPositions(grid, posList[i], posList[j]);
+            }
+          }
+
+          if (!best || currentEval.score > best.score) {
+            best = { grid: deepClone(grid), score: currentEval.score, pairs: Array.from(currentEval.pairs) };
+          }
+        }
+
+        if (!best) return { ok: false, error: "配置生成に失敗しました" };
+        return { ok: true, ...best };
       }
 
       // ---------- UI Components ----------
-      function Input({ value, onChange, type = "text", min, max, step }) {
-        // スマホ入力対策：空の状態を許容し、数値化は確定時に行う
-        const handleChange = (e) => {
-          const val = e.target.value;
-          if (type === "number") {
-            if (val === "") {
-              onChange(""); // 一時的に空を許可
-            } else {
-              const num = Number(val);
-              onChange(num);
-            }
-          } else {
-            onChange(val);
-          }
+      function Pill({ children, tone = "neutral" }) {
+        const toneMap = {
+          neutral: "bg-gray-100 text-gray-700 border-gray-200",
+          good: "bg-emerald-50 text-emerald-700 border-emerald-200",
+          warn: "bg-amber-50 text-amber-800 border-amber-200",
+          bad: "bg-rose-50 text-rose-700 border-rose-200",
+          info: "bg-sky-50 text-sky-700 border-sky-200",
+          male: "bg-sky-50 text-sky-700 border-sky-200",
+          female: "bg-rose-50 text-rose-700 border-rose-200",
+          unknown: "bg-gray-100 text-gray-700 border-gray-200",
+          vision: "bg-amber-50 text-amber-800 border-amber-200",
         };
+        return (
+          <span className={`inline-flex items-center px-2 py-0.5 text-xs border rounded-full ${toneMap[tone] || toneMap.neutral}`}>
+            {children}
+          </span>
+        );
+      }
 
+      function Section({ title, subtitle, children, right }) {
+        return (
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
+            <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-base font-semibold text-gray-900">{title}</div>
+                {subtitle ? <div className="text-sm text-gray-500 mt-0.5">{subtitle}</div> : null}
+              </div>
+              {right}
+            </div>
+            <div className="p-4">{children}</div>
+          </div>
+        );
+      }
+
+      function Button({ children, onClick, variant = "primary", disabled, title }) {
+        const base =
+          "px-3 py-2 rounded-xl text-sm font-medium transition active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed";
+        const styles =
+          variant === "primary"
+            ? "bg-gray-900 text-white hover:bg-gray-800"
+            : variant === "ghost"
+            ? "bg-transparent hover:bg-gray-100 text-gray-900"
+            : variant === "danger"
+            ? "bg-rose-600 text-white hover:bg-rose-500"
+            : "bg-gray-100 text-gray-900 hover:bg-gray-200";
+        return (
+          <button className={`${base} ${styles}`} onClick={onClick} disabled={disabled} title={title}>
+            {children}
+          </button>
+        );
+      }
+
+      function Input({ value, onChange, type = "text", min, max, step }) {
         return (
           <input
             className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm"
@@ -107,136 +496,1112 @@
             min={min}
             max={max}
             step={step}
-            inputMode={type === "number" ? "numeric" : undefined} // スマホで数字キーボードを出す
-            onChange={handleChange}
+            onChange={(e) => onChange(type === "number" ? Number(e.target.value) : e.target.value)}
           />
         );
       }
 
-      function Button({ children, onClick, variant = "primary", disabled }) {
-        const base = "px-3 py-2 rounded-xl text-sm font-medium transition active:scale-[0.98] disabled:opacity-50";
-        const styles = variant === "primary" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-900";
-        return <button className={`${base} ${styles}`} onClick={onClick} disabled={disabled}>{children}</button>;
+      function Select({ value, onChange, options }) {
+        return (
+          <select
+            className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          >
+            {options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        );
       }
 
-      function Section({ title, children }) {
+      function Toggle({ checked, onChange, label }) {
         return (
-          <div className="bg-white border border-gray-200 rounded-2xl p-4 mb-4 shadow-sm">
-            <h3 className="text-base font-semibold mb-3">{title}</h3>
-            {children}
+          <label className="flex items-center gap-2 text-sm text-gray-800">
+            <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+            {label}
+          </label>
+        );
+      }
+
+      function TextArea({ value, onChange, rows = 6, placeholder }) {
+        return (
+          <textarea
+            className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm"
+            value={value}
+            rows={rows}
+            placeholder={placeholder}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        );
+      }
+
+      function RangeRow({ label, value, min, max, step = 1, onChange, suffix = "" }) {
+        return (
+          <div className="p-3 border border-gray-200 rounded-2xl bg-white">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-medium text-gray-900">{label}</div>
+              <div className="text-sm font-semibold text-gray-800">
+                {value}
+                {suffix}
+              </div>
+            </div>
+            <input className="w-full mt-2" type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+            <div className="flex items-center justify-between text-[11px] text-gray-400 mt-1">
+              <span>
+                {min}
+                {suffix}
+              </span>
+              <span>
+                {max}
+                {suffix}
+              </span>
+            </div>
           </div>
         );
       }
 
-      // ---------- Main App ----------
+      function Modal({ open, title, children, onClose }) {
+        if (!open) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+            <div className="relative w-full max-w-2xl bg-white rounded-2xl border border-gray-200 shadow-lg">
+              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-gray-900">{title}</div>
+                <Button variant="ghost" onClick={onClose}>
+                  閉じる
+                </Button>
+              </div>
+              <div className="p-4">{children}</div>
+            </div>
+          </div>
+        );
+      }
+
+      function sanitizeFilename(name) {
+        return (name || "sekigae")
+          .toString()
+          .replace(/[\\/:*?"<>|]/g, "_")
+          .replace(/\s+/g, "_")
+          .slice(0, 120);
+      }
+
+      function downloadText(filename, text, mime = "text/plain") {
+        const blob = new Blob([text], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      async function copyToClipboard(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {
+          try {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand("copy");
+            document.body.removeChild(ta);
+            return ok;
+          } catch {
+            return false;
+          }
+        }
+      }
+
+      // ---- size change helpers ----
+      function pruneFixedMapForSize(fixedMap, rows, cols) {
+        const next = {};
+        for (const [k, v] of Object.entries(fixedMap || {})) {
+          const [r, c] = k.split("-").map(Number);
+          if (Number.isFinite(r) && Number.isFinite(c) && r >= 0 && c >= 0 && r < rows && c < cols) next[k] = v;
+        }
+        return next;
+      }
+
+      function pruneBlockedForSize(blockedSet, rows, cols) {
+        const next = new Set();
+        for (const k of blockedSet || []) {
+          const [r, c] = (k || "").split("-").map(Number);
+          if (Number.isFinite(r) && Number.isFinite(c) && r >= 0 && c >= 0 && r < rows && c < cols) next.add(k);
+        }
+        return next;
+      }
+
+      function clearCurrentIfMismatch(current, rows, cols) {
+        if (!current) return null;
+        if (current.rows === rows && current.cols === cols) return current;
+        return null;
+      }
+
+      // ★ iOSで壊れにくい数値入力（文字列で受けて、確定時に反映）
+      function StepperNumber({ label, value, draft, setDraft, min = 1, max = 15, onCommit }) {
+        const clamp = (n) => Math.max(min, Math.min(max, n));
+        const commitFromDraft = (s) => {
+          const n = parseInt(String(s || "").replace(/[^\d]/g, ""), 10);
+          if (!Number.isFinite(n)) {
+            setDraft(String(value));
+            return;
+          }
+          const v = clamp(n);
+          setDraft(String(v));
+          onCommit(v);
+        };
+
+        return (
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-gray-500">{label}</div>
+
+            <button
+              className="w-9 h-9 rounded-xl border border-gray-200 bg-white text-gray-900 active:scale-[0.99]"
+              onClick={() => {
+                const v = clamp(value - 1);
+                setDraft(String(v));
+                onCommit(v);
+              }}
+              type="button"
+              aria-label={`${label}を減らす`}
+            >
+              −
+            </button>
+
+            <input
+              className="w-16 h-9 px-2 border border-gray-200 rounded-xl text-[16px] leading-none text-center bg-white"
+              value={draft}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              onChange={(e) => {
+                const s = e.target.value;
+                // 文字列は許容（空もOK）。数字だけに寄せる
+                const cleaned = s.replace(/[^\d]/g, "");
+                setDraft(cleaned);
+                // 有効な整数なら即反映（ただし範囲外はまだ確定しない）
+                const n = parseInt(cleaned, 10);
+                if (Number.isFinite(n) && n >= min && n <= max) onCommit(n);
+              }}
+              onBlur={() => commitFromDraft(draft)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.currentTarget.blur();
+                }
+              }}
+            />
+
+            <button
+              className="w-9 h-9 rounded-xl border border-gray-200 bg-white text-gray-900 active:scale-[0.99]"
+              onClick={() => {
+                const v = clamp(value + 1);
+                setDraft(String(v));
+                onCommit(v);
+              }}
+              type="button"
+              aria-label={`${label}を増やす`}
+            >
+              +
+            </button>
+          </div>
+        );
+      }
+
       function App() {
         const [students, setStudents] = useState([]);
         const [rows, setRows] = useState(5);
         const [cols, setCols] = useState(6);
         const [blocked, setBlocked] = useState(new Set());
         const [fixedMap, setFixedMap] = useState({});
+        const [selectedSeat, setSelectedSeat] = useState(null);
         const [history, setHistory] = useState([]);
         const [current, setCurrent] = useState(null);
-        const [options, setOptions] = useState(DEFAULT_OPTIONS);
 
-        // Load
+        const [csvText, setCsvText] = useState("");
+        const [newName, setNewName] = useState("");
+        const [newGender, setNewGender] = useState("unknown");
+        const [newVision, setNewVision] = useState("normal");
+        const [newHeight, setNewHeight] = useState("normal");
+        const [newNotes, setNewNotes] = useState("");
+
+        const [options, setOptions] = useState(DEFAULT_OPTIONS);
+        const [optionsOpen, setOptionsOpen] = useState(false);
+
+        const [isGenerating, setIsGenerating] = useState(false);
+
+        const [fitToScreen, setFitToScreen] = useState(true);
+        const [isMobile, setIsMobile] = useState(false);
+        const [cellPx, setCellPx] = useState(72);
+        const gridViewportRef = useRef(null);
+
+        // ★ rows/cols 入力のドラフト（iOS対策）
+        const [rowsDraft, setRowsDraft] = useState(String(rows));
+        const [colsDraft, setColsDraft] = useState(String(cols));
+
+        useEffect(() => setRowsDraft(String(rows)), [rows]);
+        useEffect(() => setColsDraft(String(cols)), [cols]);
+
+        const GAP_PX = 8;
+        const baseCellPx = isMobile ? 72 : 84;
+        const compactMode = fitToScreen && cellPx <= 56;
+
+        // load
         useEffect(() => {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) {
+          try {
+            const rawNew = localStorage.getItem(STORAGE_KEY);
+            let raw = rawNew;
+            if (!raw) {
+              for (const k of LEGACY_KEYS) {
+                const r = localStorage.getItem(k);
+                if (r) {
+                  raw = r;
+                  break;
+                }
+              }
+            }
+            if (!raw) return;
+
             const data = JSON.parse(raw);
-            if (data.students) setStudents(data.students.map(normalizeStudent));
+
+            if (data.students) setStudents((data.students || []).map(normalizeStudent));
             if (data.rows) setRows(data.rows);
             if (data.cols) setCols(data.cols);
             if (data.blocked) setBlocked(new Set(data.blocked));
             if (data.fixedMap) setFixedMap(data.fixedMap);
             if (data.history) setHistory(data.history);
+            if (data.current) setCurrent(data.current);
+
+            if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
+            if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
+          } catch (e) {
+            console.warn(e);
           }
         }, []);
 
-        // Save
+        // save
         useEffect(() => {
-          const data = { students, rows, cols, blocked: Array.from(blocked), fixedMap, history, current, options };
+          const data = {
+            students,
+            rows,
+            cols,
+            blocked: Array.from(blocked),
+            fixedMap,
+            history,
+            current,
+            options,
+            fitToScreen,
+          };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        }, [students, rows, cols, blocked, fixedMap, history, current, options]);
+        }, [students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen]);
 
-        // ★スマホ対策の肝：サイズ変更時のクリーンアップにガードをかける
+        // mobile
         useEffect(() => {
-          // rows または cols が 0 や空文字のときはクリーンアップをスキップ（入力中とみなす）
-          if (!rows || !cols || rows < 1 || cols < 1) return;
+          const mq = window.matchMedia("(max-width: 640px)");
+          const apply = () => setIsMobile(mq.matches);
+          apply();
+          mq.addEventListener?.("change", apply);
+          return () => mq.removeEventListener?.("change", apply);
+        }, []);
 
-          setBlocked(prev => pruneBlockedForSize(prev, rows, cols));
-          setFixedMap(prev => pruneFixedMapForSize(prev, rows, cols));
-          
-          if (current && (current.rows !== rows || current.cols !== cols)) {
-            setCurrent(null); 
-          }
+        // prune on size change
+        useEffect(() => {
+          setBlocked((prev) => pruneBlockedForSize(prev, rows, cols));
+          setFixedMap((prev) => pruneFixedMapForSize(prev, rows, cols));
+          setCurrent((prev) => clearCurrentIfMismatch(prev, rows, cols));
+          setSelectedSeat((prev) => {
+            if (!prev) return null;
+            const [r, c] = prev.split("-").map(Number);
+            if (r >= 0 && c >= 0 && r < rows && c < cols) return prev;
+            return null;
+          });
         }, [rows, cols]);
 
-        const toggleBlocked = (r, c) => {
+        // cell width
+        useEffect(() => {
+          const el = gridViewportRef.current;
+          if (!el) return;
+
+          const compute = () => {
+            const vw = el.clientWidth || 1;
+            if (!fitToScreen) {
+              setCellPx(baseCellPx);
+              return;
+            }
+            const raw = Math.floor((vw - GAP_PX * Math.max(0, cols - 1)) / Math.max(1, cols));
+            const clamped = Math.max(isMobile ? 52 : 56, Math.min(baseCellPx, raw));
+            setCellPx(clamped);
+          };
+
+          compute();
+          const ro = new ResizeObserver(compute);
+          ro.observe(el);
+          window.addEventListener("resize", compute);
+          window.addEventListener("orientationchange", compute);
+          return () => {
+            ro.disconnect();
+            window.removeEventListener("resize", compute);
+            window.removeEventListener("orientationchange", compute);
+          };
+        }, [fitToScreen, cols, baseCellPx, isMobile]);
+
+        const studentsById = useMemo(() => new Map(students.map((s) => [s.id, s])), [students]);
+        const fixedStudentIds = useMemo(() => new Set(Object.values(fixedMap || {})), [fixedMap]);
+
+        const grid = useMemo(() => {
+          const g = Array.from({ length: rows }, () => Array.from({ length: cols }, () => null));
+          if (current?.grid && current.rows === rows && current.cols === cols) {
+            for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) g[r][c] = current.grid?.[r]?.[c] ?? null;
+          } else {
+            for (let r = 0; r < rows; r++) {
+              for (let c = 0; c < cols; c++) {
+                const sk = seatKey(r, c);
+                if (blocked.has(sk)) g[r][c] = null;
+                else if (fixedMap[sk]) g[r][c] = fixedMap[sk];
+              }
+            }
+          }
+          return g;
+        }, [current, rows, cols, fixedMap, blocked]);
+
+        const seatInfoFor = (r, c) => {
           const sk = seatKey(r, c);
-          setBlocked(prev => {
-            const next = new Set(prev);
-            if (next.has(sk)) next.delete(sk);
-            else next.add(sk);
+          const isBlocked = blocked.has(sk);
+          const fixedId = fixedMap[sk] || null;
+          return { sk, isBlocked, fixedId };
+        };
+
+        const countOpenSeats = useMemo(() => {
+          let open = 0;
+          for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (!blocked.has(seatKey(r, c))) open++;
+          return open;
+        }, [rows, cols, blocked]);
+
+        const visionPoorCount = useMemo(() => students.filter((s) => s.vision === "poor").length, [students]);
+
+        const prevHistory = useMemo(() => getPrevHistoryItem(history, current), [history, current]);
+
+        const layoutStats = useMemo(() => {
+          if (!current?.grid || !prevHistory?.grid) return null;
+          let sameSeat = 0;
+          const minR = Math.min(current.rows, prevHistory.rows);
+          const minC = Math.min(current.cols, prevHistory.cols);
+          for (let r = 0; r < minR; r++) {
+            for (let c = 0; c < minC; c++) {
+              const a = current.grid[r][c];
+              const b = prevHistory.grid[r][c];
+              if (a && b && a === b) sameSeat++;
+            }
+          }
+          const pairs = new Set(adjacencyPairsFromGrid(current.grid));
+          const lastPairs = new Set(prevHistory.pairs || Array.from(adjacencyPairsFromGrid(prevHistory.grid)));
+          let sameNeighbor = 0;
+          for (const p of pairs) if (lastPairs.has(p)) sameNeighbor++;
+          return { sameSeat, sameNeighbor };
+        }, [current, prevHistory]);
+
+        const repeatLR = useMemo(() => {
+          if (!current?.grid || !prevHistory?.grid) return { count: 0, seatKeys: new Set() };
+          const prevPairsLR = horizontalPairsFromGrid(prevHistory.grid);
+          const seatKeys = new Set();
+          let count = 0;
+
+          const minR = Math.min(current.grid.length, prevHistory.grid.length);
+          const minC = Math.min(current.grid[0]?.length || 0, prevHistory.grid[0]?.length || 0);
+
+          for (let r = 0; r < minR; r++) {
+            for (let c = 0; c + 1 < minC; c++) {
+              const a = current.grid[r][c];
+              const b = current.grid[r][c + 1];
+              if (!a || !b) continue;
+              const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+              if (prevPairsLR.has(k)) {
+                count++;
+                seatKeys.add(seatKey(r, c));
+                seatKeys.add(seatKey(r, c + 1));
+              }
+            }
+          }
+          return { count, seatKeys };
+        }, [current, prevHistory]);
+
+        const addStudent = () => {
+          const name = newName.trim();
+          if (!name) return;
+          setStudents((prev) =>
+            prev.concat([
+              normalizeStudent({
+                id: uid(),
+                name,
+                gender: newGender,
+                vision: newVision,
+                height: newHeight,
+                notes: newNotes.trim(),
+              }),
+            ])
+          );
+          setNewName("");
+          setNewNotes("");
+          setNewGender("unknown");
+          setNewVision("normal");
+          setNewHeight("normal");
+        };
+
+        const removeStudent = (id) => {
+          setStudents((prev) => prev.filter((s) => s.id !== id));
+          setFixedMap((prev) => {
+            const next = { ...prev };
+            for (const k of Object.keys(next)) if (next[k] === id) delete next[k];
             return next;
           });
         };
 
+        const importCSV = () => {
+          const parsed = parseCSVLike(csvText);
+          if (!parsed.length) return;
+          setStudents((prev) => prev.concat(parsed));
+          setCsvText("");
+        };
+
+        const clearAll = () => {
+          if (!confirm("名簿・席設定・履歴をすべて消します。よろしいですか？")) return;
+          setStudents([]);
+          setBlocked(new Set());
+          setFixedMap({});
+          setHistory([]);
+          setCurrent(null);
+          setSelectedSeat(null);
+          localStorage.removeItem(STORAGE_KEY);
+          for (const k of LEGACY_KEYS) localStorage.removeItem(k);
+        };
+
+        const toggleBlocked = (sk) => {
+          setBlocked((prev) => {
+            const next = new Set(prev);
+            if (next.has(sk)) next.delete(sk);
+            else {
+              if (fixedMap[sk]) {
+                setFixedMap((m) => {
+                  const nm = { ...m };
+                  delete nm[sk];
+                  return nm;
+                });
+              }
+              next.add(sk);
+            }
+            return next;
+          });
+        };
+
+        const setFixedForSeat = (sk, studentIdOrEmpty) => {
+          setFixedMap((prev) => {
+            const next = { ...prev };
+            if (!studentIdOrEmpty) {
+              delete next[sk];
+            } else {
+              for (const k of Object.keys(next)) if (next[k] === studentIdOrEmpty) delete next[k];
+              next[sk] = studentIdOrEmpty;
+            }
+            return next;
+          });
+        };
+
+        const generate = () => {
+          if (isGenerating) return;
+          if (!students.length) {
+            alert("名簿に生徒を追加してください。");
+            return;
+          }
+
+          setIsGenerating(true);
+          setSelectedSeat(null);
+
+          setTimeout(() => {
+            try {
+              const effectiveOptions = { ...options };
+              if (isMobile) {
+                effectiveOptions.trials = Math.min(effectiveOptions.trials, 40);
+                effectiveOptions.hillSteps = Math.min(effectiveOptions.hillSteps, 80);
+              }
+
+              const res = generateSeating({ students, rows, cols, blocked, fixedMap, history, options: effectiveOptions });
+              if (!res.ok) {
+                alert(res.error);
+                return;
+              }
+
+              const now = new Date();
+              const title = `席替え ${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(
+                2,
+                "0"
+              )} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+              const item = {
+                id: uid(),
+                title,
+                createdAt: now.toISOString(),
+                rows,
+                cols,
+                grid: res.grid,
+                pairs: res.pairs,
+                score: res.score,
+                rosterSnapshot: students.map((s) => ({ id: s.id, name: s.name })),
+              };
+
+              setCurrent(item);
+              setHistory((prev) => prev.concat([item]));
+            } catch (e) {
+              console.error(e);
+              alert("生成中にエラーが発生しました: " + (e?.message || e));
+            } finally {
+              setIsGenerating(false);
+            }
+          }, 0);
+        };
+
+        const [historyWarnOpen, setHistoryWarnOpen] = useState(false);
+        const [historyWarnText, setHistoryWarnText] = useState("");
+
+        const loadHistory = (id) => {
+          const h = history.find((x) => x.id === id);
+          if (!h) return;
+
+          if (h.rows !== rows || h.cols !== cols) {
+            setHistoryWarnText(
+              `この履歴は ${h.rows}×${h.cols} で作成されています。現在の座席数（${rows}×${cols}）と違うため、座席数は変更せずに「現在表示」は解除しました。必要なら先に座席数を合わせてから表示してください。`
+            );
+            setHistoryWarnOpen(true);
+            setCurrent(null);
+            return;
+          }
+          setCurrent(h);
+          setSelectedSeat(null);
+        };
+
+        const deleteHistory = (id) => {
+          if (!confirm("この履歴を削除しますか？")) return;
+          setHistory((prev) => prev.filter((x) => x.id !== id));
+          if (current?.id === id) setCurrent(null);
+        };
+
+        const exportJSON = () => {
+          const data = {
+            students,
+            rows,
+            cols,
+            blocked: Array.from(blocked),
+            fixedMap,
+            history,
+            current,
+            options,
+            fitToScreen,
+            exportedAt: new Date().toISOString(),
+          };
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "sekigae_data.json";
+          a.click();
+          URL.revokeObjectURL(url);
+        };
+
+        const importJSON = async (file) => {
+          const text = await file.text();
+          const data = JSON.parse(text);
+
+          if (data.students) setStudents((data.students || []).map(normalizeStudent));
+          if (data.rows) setRows(data.rows);
+          if (data.cols) setCols(data.cols);
+          if (data.blocked) setBlocked(new Set(data.blocked));
+          if (data.fixedMap) setFixedMap(data.fixedMap);
+          if (data.history) setHistory(data.history);
+          if (data.current) setCurrent(data.current);
+
+          if (data.options) setOptions({ ...DEFAULT_OPTIONS, ...data.options });
+          if (typeof data.fitToScreen === "boolean") setFitToScreen(data.fitToScreen);
+        };
+
+        const onSeatClick = (r, c) => setSelectedSeat(seatKey(r, c));
+
+        const genderLabel = (g) => (g === "male" ? "男" : g === "female" ? "女" : "未");
+        const genderTone = (g) => (g === "male" ? "male" : g === "female" ? "female" : "unknown");
+
+        // ---------- CSV Export from history ----------
+        const [csvModalOpen, setCsvModalOpen] = useState(false);
+        const [csvModalTitle, setCsvModalTitle] = useState("");
+        const [csvModalBody, setCsvModalBody] = useState("");
+
+        const makeCSVFromHistory = (h) => {
+          if (!h?.grid) return "";
+          const snap = new Map();
+          (h.rosterSnapshot || []).forEach((s) => snap.set(s.id, s.name));
+          const resolveName = (id) => snap.get(id) || studentsById.get(id)?.name || "";
+
+          const lines = [];
+          for (let r = 0; r < h.grid.length; r++) {
+            const row = h.grid[r] || [];
+            const names = row.map((sid) => (sid ? resolveName(sid) : ""));
+            lines.push(names.join(","));
+          }
+          return lines.join("\n");
+        };
+
+        const openCSVModalForHistory = (h) => {
+          const csv = makeCSVFromHistory(h);
+          if (!csv) {
+            alert("CSVを作成できませんでした。");
+            return;
+          }
+          setCsvModalTitle(`CSV出力: ${h.title}`);
+          setCsvModalBody(csv);
+          setCsvModalOpen(true);
+        };
+
         return (
-          <div className="max-w-4xl mx-auto p-4 pb-20">
-            <header className="mb-6">
-              <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
-              <p className="text-sm text-gray-500">スマホ・PC両対応版</p>
-            </header>
+          <div className="min-h-screen bg-gray-50">
+            <div className="max-w-6xl mx-auto px-4 py-6">
+              <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">席替えアプリ</h1>
+                  <p className="text-sm text-gray-600 mt-1">名簿・属性・座席制約・ランダム配置・履歴を端末内に保存。スマホ/タブレットでもブラウザで動きます。</p>
 
-            <Section title="1. 座席サイズの設定">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">縦の列数 (行)</label>
-                  <Input type="number" value={rows} onChange={setRows} min="1" />
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <Pill tone="info">生徒 {students.length}人</Pill>
+                    <Pill tone={countOpenSeats >= students.length ? "good" : "bad"}>利用可能 {countOpenSeats}席</Pill>
+                    <Pill tone={visionPoorCount ? "warn" : "neutral"}>視力配慮 {visionPoorCount}人</Pill>
+                    {options.preferMixedGender ? <Pill tone="info">男女を隣り合わせ: ON</Pill> : <Pill>男女を隣り合わせ: OFF</Pill>}
+                    {current ? <Pill tone="good">現在表示: {current.title}</Pill> : <Pill>現在表示: 未生成</Pill>}
+                    {current && prevHistory ? <Pill tone={repeatLR.count === 0 ? "good" : "warn"}>直前と同じ左右 {repeatLR.count}</Pill> : null}
+                    {layoutStats ? (
+                      <Pill tone={layoutStats.sameNeighbor === 0 ? "good" : "warn"}>
+                        直前との差: 同席 {layoutStats.sameSeat} / 同隣 {layoutStats.sameNeighbor}
+                      </Pill>
+                    ) : null}
+                    {isGenerating ? <Pill tone="warn">生成中...</Pill> : null}
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">横の席数 (列)</label>
-                  <Input type="number" value={cols} onChange={setCols} min="1" />
+
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={generate} disabled={!students.length || isGenerating} title="制約と履歴を考慮して席替えを生成">
+                    {isGenerating ? "生成中..." : "席替えを生成"}
+                  </Button>
+
+                  <Button variant="secondary" onClick={exportJSON} title="設定と履歴をJSONで書き出し">
+                    情報を保存
+                  </Button>
+
+                  <label className="px-3 py-2 rounded-xl text-sm font-medium bg-gray-100 hover:bg-gray-200 cursor-pointer">
+                    情報を読込
+                    <input
+                      type="file"
+                      accept="application/json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) importJSON(f);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+
+                  <Button variant="danger" onClick={clearAll}>
+                    全消去
+                  </Button>
                 </div>
               </div>
-              <p className="text-[11px] text-amber-600 mt-2">※数字を消しても設定は保持されます。新しい数字を入力してください。</p>
-            </Section>
 
-            <Section title="2. 座席レイアウト">
-              <p className="text-xs text-gray-500 mb-3">席をタップして「使用しない席(黒)」を切り替えます。</p>
-              <div 
-                className="grid gap-2 mx-auto" 
-                style={{ 
-                  gridTemplateColumns: `repeat(${cols || 1}, minmax(0, 1fr))`,
-                  maxWidth: '100%' 
-                }}
-              >
-                {Array.from({ length: rows || 0 }).map((_, r) =>
-                  Array.from({ length: cols || 0 }).map((_, c) => {
-                    const sk = seatKey(r, c);
-                    const isBlocked = blocked.has(sk);
-                    return (
-                      <div
-                        key={sk}
-                        onClick={() => toggleBlocked(r, c)}
-                        className={`aspect-square border-2 rounded-lg flex items-center justify-center cursor-pointer transition-colors ${
-                          isBlocked ? 'bg-gray-800 border-gray-800 text-white' : 'bg-white border-gray-200 hover:border-blue-400'
-                        }`}
-                      >
-                        <span className="text-[10px] opacity-30">{r}-{c}</span>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
+                {/* Seating */}
+                <div className="lg:col-span-2 space-y-4">
+                  <Section
+                    title="座席表"
+                    subtitle="前（黒板側）は上。座席をタップして「利用不可」や「固定割当」を設定できます。列数が多い場合は『横幅に合わせる』で横スクロールを減らします。"
+                    right={
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                        <label className="flex items-center gap-2 text-xs text-gray-700">
+                          <input type="checkbox" checked={fitToScreen} onChange={(e) => setFitToScreen(e.target.checked)} />
+                          横幅に合わせる
+                        </label>
+
+                        {/* ★ ここをiOSで壊れにくい入力に差し替え */}
+                        <div className="flex items-center gap-2">
+                          <StepperNumber
+                            label="縦"
+                            value={rows}
+                            draft={rowsDraft}
+                            setDraft={setRowsDraft}
+                            min={1}
+                            max={15}
+                            onCommit={(v) => setRows(v)}
+                          />
+                          <div className="text-xs text-gray-400">×</div>
+                          <StepperNumber
+                            label="横"
+                            value={cols}
+                            draft={colsDraft}
+                            setDraft={setColsDraft}
+                            min={1}
+                            max={15}
+                            onCommit={(v) => setCols(v)}
+                          />
+                        </div>
                       </div>
-                    );
-                  })
-                )}
-              </div>
-            </Section>
+                    }
+                  >
+                    <div ref={gridViewportRef} className={fitToScreen ? "overflow-hidden" : "overflow-auto"}>
+                      {fitToScreen && compactMode ? (
+                        <div className="text-xs text-gray-500 mb-2">列数が多いため、情報タグを一部省略表示しています（名前は省略しません）。</div>
+                      ) : null}
 
-            <div className="fixed bottom-4 left-4 right-4 max-w-4xl mx-auto">
-               <Button onClick={() => alert("名簿機能などは元のロジックを統合してください")} variant="primary">
-                 設定完了
-               </Button>
+                      <div
+                        className="grid gap-2"
+                        style={{
+                          gridTemplateColumns: `repeat(${cols}, ${fitToScreen ? cellPx : baseCellPx}px)`,
+                        }}
+                      >
+                        {Array.from({ length: rows }).map((_, r) =>
+                          Array.from({ length: cols }).map((_, c) => {
+                            const { sk, isBlocked, fixedId } = seatInfoFor(r, c);
+                            const sid = grid[r][c];
+                            const st = sid ? studentsById.get(sid) : null;
+                            const isSelected = selectedSeat === sk;
+
+                            const isRepeatLR = !!(repeatLR?.seatKeys && repeatLR.seatKeys.has(sk));
+                            const repeatOutline = !isBlocked && isRepeatLR ? "outline outline-2 outline-rose-400 outline-offset-1" : "";
+
+                            const showTags = !compactMode;
+
+                            const base = "rounded-2xl border p-2 text-xs sm:text-sm min-h-[64px] flex flex-col justify-between text-left transition";
+                            const baseCompact = "rounded-2xl border p-1 text-[10px] min-h-[58px] flex flex-col justify-between text-left transition";
+
+                            let bg = "bg-white border-gray-200";
+                            if (st?.gender === "male") bg = "bg-sky-50 border-sky-200";
+                            if (st?.gender === "female") bg = "bg-rose-50 border-rose-200";
+                            if (isBlocked) bg = "bg-gray-200 border-gray-200 text-gray-500";
+                            if (fixedId) bg = "bg-amber-50 border-amber-200";
+
+                            const ring = isSelected ? "ring-2 ring-gray-400 ring-offset-1" : "";
+
+                            const nameColor = isBlocked
+                              ? "text-gray-500"
+                              : st?.gender === "male"
+                              ? "text-sky-700"
+                              : st?.gender === "female"
+                              ? "text-rose-700"
+                              : "text-gray-900";
+
+                            const displayName = isBlocked ? "利用不可" : st ? st.name : "空";
+
+                            return (
+                              <button
+                                key={sk}
+                                onClick={() => onSeatClick(r, c)}
+                                className={`${compactMode ? baseCompact : base} ${bg} ${ring} ${repeatOutline}`}
+                                title={st ? st.name : ""}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className={`font-semibold ${nameColor} ${compactMode ? "leading-tight text-[11px]" : ""} whitespace-normal break-words`}>
+                                    {displayName}
+                                  </div>
+                                  <div className="text-[10px] text-gray-400 flex-shrink-0">
+                                    {r + 1}-{c + 1}
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {isBlocked ? <Pill>×</Pill> : null}
+                                  {fixedId ? <Pill tone="warn">固定</Pill> : null}
+                                  {isRepeatLR ? <Pill tone="bad">左右(前回同じ)</Pill> : null}
+                                  {st?.vision === "poor" ? <Pill tone="vision">視力:配慮</Pill> : null}
+                                  {showTags && st ? <Pill tone={genderTone(st.gender)}>性別:{genderLabel(st.gender)}</Pill> : null}
+                                  {showTags && st?.height === "tall" ? <Pill tone="neutral">身長:高</Pill> : null}
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
+                    {selectedSeat ? (
+                      <div className="mt-4 p-3 border border-gray-200 rounded-2xl bg-gray-50">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="font-semibold text-gray-900">選択中の席: {selectedSeat}</div>
+                          <Button variant="ghost" onClick={() => setSelectedSeat(null)}>
+                            閉じる
+                          </Button>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                          <div className="sm:col-span-1">
+                            <Toggle checked={blocked.has(selectedSeat)} onChange={() => toggleBlocked(selectedSeat)} label="この席を利用不可にする" />
+                            <div className="text-xs text-gray-500 mt-1">利用不可にすると固定割当は解除されます。</div>
+                          </div>
+
+                          <div className="sm:col-span-2">
+                            <div className="text-sm font-medium text-gray-800">この席を生徒に固定割当</div>
+                            <div className="text-xs text-gray-500 mt-1">固定されると席替え生成時も動きません。</div>
+                            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <Select
+                                value={fixedMap[selectedSeat] || ""}
+                                onChange={(v) => setFixedForSeat(selectedSeat, v)}
+                                options={[
+                                  { value: "", label: "（固定なし）" },
+                                  ...students.map((s) => ({
+                                    value: s.id,
+                                    label: `${s.name}（${genderLabel(s.gender)}）${s.vision === "poor" ? "（視力配慮）" : ""}${s.height === "tall" ? "（高身長）" : ""}`,
+                                  })),
+                                ]}
+                              />
+                              <div className="text-xs text-gray-500 flex items-center">※同じ生徒を複数席に固定することはできません。</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </Section>
+
+                  <Section title="履歴" subtitle="過去の席順を保存。生成時に『できるだけ同じ席/隣』を避けます。履歴からCSV（カンマ区切り＋改行）を作ってExcelに貼り付けできます。">
+                    {history.length === 0 ? (
+                      <div className="text-sm text-gray-600">まだ履歴がありません。「席替えを生成」を押してください。</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {history
+                          .slice()
+                          .reverse()
+                          .map((h) => (
+                            <div key={h.id} className="flex items-center justify-between gap-3 p-3 border border-gray-200 rounded-2xl bg-white">
+                              <div>
+                                <div className="text-sm font-semibold text-gray-900">{h.title}</div>
+                                <div className="text-xs text-gray-500 mt-0.5">
+                                  {new Date(h.createdAt).toLocaleString()} / {h.rows}×{h.cols} / score {Math.round(h.score)}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap justify-end">
+                                <Button variant="secondary" onClick={() => loadHistory(h.id)}>
+                                  表示
+                                </Button>
+                                <Button variant="secondary" onClick={() => openCSVModalForHistory(h)} title="CSVを表示してコピーできます">
+                                  CSV
+                                </Button>
+                                <Button variant="danger" onClick={() => deleteHistory(h.id)}>
+                                  削除
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </Section>
+                </div>
+
+                {/* Roster & Options */}
+                <div className="space-y-4">
+                  <Section title="名簿" subtitle="生徒名と属性を登録。CSV/TSV貼り付けもOK。">
+                    <div className="grid grid-cols-1 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">名前</div>
+                          <Input value={newName} onChange={setNewName} />
+                        </div>
+
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">性別</div>
+                          <Select
+                            value={newGender}
+                            onChange={setNewGender}
+                            options={[
+                              { value: "unknown", label: "未設定" },
+                              { value: "male", label: "男" },
+                              { value: "female", label: "女" },
+                            ]}
+                          />
+                        </div>
+
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">視力</div>
+                          <Select
+                            value={newVision}
+                            onChange={setNewVision}
+                            options={[
+                              { value: "normal", label: "普通" },
+                              { value: "poor", label: "配慮（前方優先）" },
+                            ]}
+                          />
+                        </div>
+
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">身長</div>
+                          <Select
+                            value={newHeight}
+                            onChange={setNewHeight}
+                            options={[
+                              { value: "normal", label: "普通" },
+                              { value: "tall", label: "高い（後方寄り）" },
+                            ]}
+                          />
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <div className="text-xs text-gray-500 mb-1">メモ</div>
+                          <Input value={newNotes} onChange={setNewNotes} />
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button onClick={addStudent} disabled={!newName.trim()}>
+                          追加
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-sm font-medium text-gray-900">CSV/TSV貼り付けで一括追加</div>
+                      <div className="text-xs text-gray-500 mt-1">列: 名前, 性別, 視力, 身長, メモ…（旧形式: 名前, 視力, 身長, メモ… も可）</div>
+                      <div className="mt-2">
+                        <TextArea value={csvText} onChange={setCsvText} rows={5} placeholder={`例\n佐藤,male,poor,normal,メガネ\n鈴木,female,normal,tall,`} />
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        <Button variant="secondary" onClick={importCSV} disabled={!csvText.trim()}>
+                          取り込み
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-sm font-medium text-gray-900">生徒一覧</div>
+                      {students.length === 0 ? (
+                        <div className="text-sm text-gray-600 mt-1">まだ名簿がありません。</div>
+                      ) : (
+                        <div className="mt-2 max-h-[320px] overflow-auto space-y-2">
+                          {students.map((s) => (
+                            <div key={s.id} className="p-3 border border-gray-200 rounded-2xl bg-white flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                                  {s.name}
+                                  {fixedStudentIds.has(s.id) ? <Pill tone="warn">固定中</Pill> : null}
+                                </div>
+                                <div className="flex flex-wrap gap-2 mt-1">
+                                  <Pill tone={genderTone(s.gender)}>性別: {genderLabel(s.gender)}</Pill>
+                                  {s.vision === "poor" ? <Pill tone="vision">視力: 配慮</Pill> : <Pill>視力: 普通</Pill>}
+                                  <Pill>身長: {s.height === "tall" ? "高" : "普通"}</Pill>
+                                  {s.notes ? <Pill>{s.notes}</Pill> : null}
+                                </div>
+                              </div>
+                              <Button variant="danger" onClick={() => removeStudent(s.id)}>
+                                削除
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </Section>
+
+                  <Section
+                    title="生成オプション"
+                    subtitle="男女の隣り合わせON/OFFはここで切替。数値調整（バー）は『詳細』で開きます。"
+                    right={
+                      <Button variant="ghost" onClick={() => setOptionsOpen((v) => !v)}>
+                        {optionsOpen ? "閉じる" : "詳細"}
+                      </Button>
+                    }
+                  >
+                    <div className="space-y-3">
+                      <div className="p-3 border border-gray-200 rounded-2xl bg-gray-50">
+                        <Toggle
+                          checked={options.preferMixedGender}
+                          onChange={(v) => setOptions((o) => ({ ...o, preferMixedGender: v }))}
+                          label="男女をなるべく隣り合わせにする（2列ごとのペアで判定）"
+                        />
+                        <div className="text-xs text-gray-500 mt-1">
+                          ONにすると、同じ行の「(1,2列)(3,4列)…」のペア内で同性になりにくいように評価します（完全保証ではなく“なるべく”です）。
+                        </div>
+                      </div>
+
+                      {!optionsOpen ? (
+                        <div className="text-sm text-gray-700">
+                          <div className="text-xs text-gray-500">現在の設定（概要）</div>
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            <Pill>試行 {options.trials}</Pill>
+                            <Pill>改善 {options.hillSteps}</Pill>
+                            <Pill>履歴 {options.historyWindow}</Pill>
+                            <Pill>視力重み {options.visionWeight}</Pill>
+                            <Pill>同席 {options.sameSeatPenalty}</Pill>
+                            <Pill>同隣 {options.sameNeighborPenalty}</Pill>
+                            {options.preferMixedGender ? <Pill tone="info">男女重み {options.genderMixWeight}</Pill> : null}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <RangeRow label="試行回数" value={options.trials} min={10} max={400} step={10} onChange={(v) => setOptions((o) => ({ ...o, trials: v }))} />
+                          <RangeRow label="改善ステップ" value={options.hillSteps} min={20} max={600} step={10} onChange={(v) => setOptions((o) => ({ ...o, hillSteps: v }))} />
+                          <RangeRow label="履歴参照数" value={options.historyWindow} min={1} max={30} step={1} onChange={(v) => setOptions((o) => ({ ...o, historyWindow: v }))} />
+                          <RangeRow label="視力の重み（前方優先）" value={options.visionWeight} min={0} max={10} step={1} onChange={(v) => setOptions((o) => ({ ...o, visionWeight: v }))} />
+                          <RangeRow label="同席ペナルティ" value={options.sameSeatPenalty} min={0} max={20} step={1} onChange={(v) => setOptions((o) => ({ ...o, sameSeatPenalty: v }))} />
+                          <RangeRow label="同隣ペナルティ" value={options.sameNeighborPenalty} min={0} max={20} step={1} onChange={(v) => setOptions((o) => ({ ...o, sameNeighborPenalty: v }))} />
+                          {options.preferMixedGender ? (
+                            <RangeRow label="男女混在の重み" value={options.genderMixWeight} min={0} max={10} step={1} onChange={(v) => setOptions((o) => ({ ...o, genderMixWeight: v }))} />
+                          ) : (
+                            <div className="text-xs text-gray-500">※「男女をなるべく隣り合わせ」にすると、この重みが有効になります。</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </Section>
+
+                  <Section title="使い方" subtitle="確認用の最短手順です。">
+                    <ol className="list-decimal pl-5 text-sm text-gray-700 space-y-2">
+                      <li>右の「名簿」で生徒を追加（またはCSV貼り付け→取り込み）。</li>
+                      <li>座席表をタップして、利用不可や固定割当を必要に応じて設定。</li>
+                      <li>上部の「席替えを生成」を押す。</li>
+                      <li>気に入らなければもう一度生成（履歴が増えるので少しずつ「過去と違う」方向に寄ります）。</li>
+                    </ol>
+                  </Section>
+                </div>
+              </div>
+
+              <footer className="text-xs text-gray-500 mt-6">データは端末内（localStorage）に保存されます。共有したい場合は「情報を保存 / 情報を読込」を使ってください。</footer>
             </div>
+
+            {/* CSV Modal */}
+            <Modal open={csvModalOpen} title={csvModalTitle} onClose={() => setCsvModalOpen(false)}>
+              <div className="text-xs text-gray-600 mb-2">そのままコピーしてExcelに貼り付けできます（カンマ区切り＋改行）。</div>
+              <textarea className="w-full h-56 px-3 py-2 border border-gray-200 rounded-xl text-xs font-mono" readOnly value={csvModalBody} />
+              <div className="flex flex-wrap gap-2 mt-3 justify-end">
+                <Button
+                  variant="secondary"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(csvModalBody);
+                    alert(ok ? "コピーしました。" : "コピーできませんでした。手動で選択してコピーしてください。");
+                  }}
+                >
+                  コピー
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    const fn = sanitizeFilename(csvModalTitle.replace(/^CSV出力:\s*/, "")) + ".csv";
+                    downloadText(fn, csvModalBody, "text/csv");
+                  }}
+                >
+                  CSV保存
+                </Button>
+              </div>
+            </Modal>
+
+            {/* History warn */}
+            <Modal open={historyWarnOpen} title="履歴のサイズが違います" onClose={() => setHistoryWarnOpen(false)}>
+              <div className="text-sm text-gray-700 whitespace-pre-wrap">{historyWarnText}</div>
+              <div className="mt-3 text-xs text-gray-500">※座席数を変えたあとに履歴を表示すると、座席数が元に戻って見えることがあるため、上書きしない仕様にしています。</div>
+            </Modal>
           </div>
         );
       }
